@@ -1,21 +1,31 @@
-const express = require("express");
-const mongoose = require("mongoose");
-const cors = require("cors");
+// server.js
+require('dotenv').config();
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
 
 const app = express();
 app.use(express.json());
-app.use(cors({ origin: '*' }));
+app.use(cors({ origin: '*' })); // สำหรับ dev เท่านั้น
 
-// MongoDB Connection
-const mongoUri = `mongodb+srv://nippit62:ohm0966477158@testing.hgxbz.mongodb.net/?retryWrites=true&w=majority`;
+// ================= MongoDB =================
+const mongoUri = process.env.MONGODB_URI;
+if (!mongoUri) {
+    console.error('❌ MONGODB_URI not set in .env');
+    process.exit(1);
+}
 
-mongoose.connect(mongoUri).then(() => {
-    console.log("Connected to MongoDB Atlas");
-}).catch((err) => {
-    console.error("MongoDB connection error:", err);
+mongoose.connect(mongoUri, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+})
+.then(() => console.log('✅ Connected to MongoDB Atlas'))
+.catch(err => {
+    console.error('❌ MongoDB connection error:', err);
+    process.exit(1);
 });
 
-// Schema
+// ================= Schema =================
 const px_dh_schema = new mongoose.Schema({
     voltage: Number,
     current: Number,
@@ -28,36 +38,71 @@ const px_dh_schema = new mongoose.Schema({
     voltage3: Number,
     voltageln: Number,
     voltagell: Number,
-    timestamp: { type: Date, default: () => new Date(Date.now() + (7 * 60 * 60 * 1000)) },
+    timestamp: { type: Date, default: Date.now }, // เก็บ UTC
+}, { timestamps: true });
+
+const PowerPXDH11 = mongoose.model("power_px_dh11", px_dh_schema);
+
+// ================= Helper Functions =================
+function calculateBill(energyKwh, ratePerKwh = 4.4) {
+    return Number((energyKwh * ratePerKwh).toFixed(2));
+}
+
+// แปลง YYYY-MM-DD เป็น UTC Date range
+function getDayRange(dateStr) {
+    const start = new Date(dateStr + "T00:00:00.000Z"); // ใช้ UTC ตรง ๆ
+    const end = new Date(dateStr + "T23:59:59.999Z");
+    return { start, end };
+}
+
+// แปลง YYYY-MM เป็น UTC month range
+function getMonthRange(yearMonth) {
+    const start = new Date(`${yearMonth}-01T00:00:00.000Z`);
+    const nextMonth = new Date(start);
+    nextMonth.setMonth(nextMonth.getMonth() + 1);
+    return { start, end: nextMonth };
+}
+
+// ================= Routes =================
+
+// Health check
+app.get('/', (req, res) => {
+    res.json({
+        status: 'OK',
+        service: 'px_dh Daily Bill API',
+        version: '1.0.3',
+        timestamp: new Date().toISOString()
+    });
 });
 
-const power_px_dh11 = mongoose.model("power_px_dh11", px_dh_schema);
-
-// Daily Bill - วันปัจจุบัน หรือระบุผ่าน query ?date=
+// ================= Daily Bill =================
 app.get('/daily-bill', async (req, res) => {
     try {
-        const selectedDate = req.query.date || new Date().toISOString().split('T')[0];
-        
-        const aggregationResult = await power_px_dh11.aggregate([
-            {
-                $match: {
-                    timestamp: {
-                        $gte: new Date(`${selectedDate}T00:00:00Z`),
-                        $lt: new Date(`${selectedDate}T23:59:59.999Z`),
-                    },
-                },
-            },
+        const today = new Date().toISOString().split('T')[0];
+        const selectedDate = req.query.date || today;
+
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(selectedDate)) {
+            return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD', example: '2025-09-30' });
+        }
+
+        const { start, end } = getDayRange(selectedDate);
+
+        const agg = await PowerPXDH11.aggregate([
+            { $match: { timestamp: { $gte: start, $lte: end } } },
             {
                 $group: {
                     _id: null,
                     totalPower: { $sum: "$power" },
+                    avgPower: { $avg: "$power" },
+                    maxPower: { $max: "$power" },
+                    minPower: { $min: "$power" },
                     count: { $sum: 1 },
-                },
-            },
+                }
+            }
         ]);
 
-        if (!aggregationResult.length) {
-            return res.status(404).json({ 
+        if (!agg.length) {
+            return res.status(404).json({
                 error: `No data found for ${selectedDate}`,
                 date: selectedDate,
                 total_energy_kwh: 0,
@@ -65,71 +110,195 @@ app.get('/daily-bill', async (req, res) => {
             });
         }
 
-        const totalEnergyKwh = aggregationResult[0].totalPower / 60;
-        const electricityBill = Number((totalEnergyKwh * 4.4).toFixed(2));
+        const result = agg[0];
+        const totalEnergyKwh = Number((result.totalPower / 60).toFixed(2));
+        const electricityBill = calculateBill(totalEnergyKwh);
 
         res.json({
             date: selectedDate,
-            samples: aggregationResult[0].count,
-            total_energy_kwh: Number(totalEnergyKwh.toFixed(2)),
+            samples: result.count,
+            total_energy_kwh: totalEnergyKwh,
+            avg_power_kw: Number(result.avgPower.toFixed(2)),
+            max_power_kw: Number(result.maxPower.toFixed(2)),
+            min_power_kw: Number(result.minPower.toFixed(2)),
             electricity_bill: electricityBill,
+            rate_per_kwh: 4.4
         });
-
     } catch (err) {
-        console.error('Error:', err);
-        res.status(500).json({ error: 'Failed to process data' });
+        console.error('❌ /daily-bill error:', err);
+        res.status(500).json({ error: 'Failed to process data', message: err.message });
     }
 });
 
-// Daily Bill - ระบุวันที่ผ่าน URL parameter
+// /daily-bill/:date
 app.get('/daily-bill/:date', async (req, res) => {
-    try {
-        const dateStr = req.params.date.trim();
+    req.query.date = req.params.date;
+    return app._router.handle(req, res);
+});
 
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-            return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+// ================= Monthly Summary =================
+app.get('/monthly-summary/:yearMonth', async (req, res) => {
+    try {
+        const yearMonth = req.params.yearMonth;
+        if (!/^\d{4}-\d{2}$/.test(yearMonth)) {
+            return res.status(400).json({ error: 'Invalid month format. Use YYYY-MM', example: '2025-09' });
         }
 
-        const start = new Date(`${dateStr}T00:00:00Z`);
-        const end = new Date(`${dateStr}T23:59:59.999Z`);
+        const { start, end } = getMonthRange(yearMonth);
 
-        const agg = await power_px_dh11.aggregate([
-            { $match: { timestamp: { $gte: start, $lte: end } } },
+        const agg = await PowerPXDH11.aggregate([
+            { $match: { timestamp: { $gte: start, $lt: end } } },
+            {
+                $project: {
+                    power: 1,
+                    localDate: {
+                        $dateToString: {
+                            format: "%Y-%m-%d",
+                            date: "$timestamp" // ใช้ UTC ตรง ๆ
+                        }
+                    }
+                }
+            },
             {
                 $group: {
-                    _id: null,
-                    totalPowerKWsum: { $sum: '$power' },
-                    count: { $sum: 1 },
-                },
+                    _id: "$localDate",
+                    totalPowerSum: { $sum: "$power" },
+                    count: { $sum: 1 }
+                }
             },
+            { $sort: { "_id": 1 } }
         ]);
 
         if (!agg.length) {
-            return res.status(404).json({ error: `No data found for ${dateStr}` });
+            return res.status(404).json({
+                error: `No data found for ${yearMonth}`,
+                month: yearMonth,
+                daily_summary: []
+            });
         }
 
-        const totalEnergyKwh = agg[0].totalPowerKWsum / 60;
-        const electricityBill = Number((totalEnergyKwh * 4.4).toFixed(2));
+        const dailySummary = agg.map(item => {
+            const energyKwh = Number((item.totalPowerSum / 60).toFixed(2));
+            return {
+                date: item._id,
+                samples: item.count,
+                total_energy_kwh: energyKwh,
+                electricity_bill: calculateBill(energyKwh)
+            };
+        });
+
+        const monthTotal = dailySummary.reduce((sum, day) => sum + day.total_energy_kwh, 0);
+        const monthBill = calculateBill(monthTotal);
 
         res.json({
-            date: dateStr,
-            samples: agg[0].count,
-            total_energy_kwh: Number(totalEnergyKwh.toFixed(2)),
-            electricity_bill: electricityBill,
+            month: yearMonth,
+            total_days: dailySummary.length,
+            total_energy_kwh: Number(monthTotal.toFixed(2)),
+            total_electricity_bill: monthBill,
+            daily_summary: dailySummary
         });
+
     } catch (err) {
-        console.error('Error:', err);
-        res.status(500).json({ error: 'Failed to process data' });
+        console.error('❌ /monthly-summary error:', err);
+        res.status(500).json({ error: 'Failed to get monthly summary', message: err.message });
     }
 });
 
-// Health check
-app.get('/', (req, res) => {
-    res.json({ status: 'OK', service: 'px_dh Daily Bill API' });
+// ================= Monthly Calendar =================
+app.get('/calendar', async (req, res) => {
+    try {
+        // ดึงข้อมูลทั้งหมด แต่จำกัด fields ที่ต้องใช้
+        const agg = await PowerPXDH11.aggregate([
+            {
+                $project: {
+                    power: 1,
+                    localDate: {
+                        $dateToString: { format: "%Y-%m-%d", date: "$timestamp" }
+                    }
+                }
+            },
+            {
+                $group: {
+                    _id: "$localDate",
+                    totalPowerSum: { $sum: "$power" },
+                    count: { $sum: 1 }
+                }
+            },
+            { $sort: { "_id": 1 } }
+        ]);
+
+        if (!agg.length) {
+            return res.status(404).json({ error: 'No data found in database' });
+        }
+
+        // สร้างสอง events ต่อวัน: kWh และ ค่าไฟ
+        const events = agg.flatMap(item => {
+            const energyKwh = Number((item.totalPowerSum / 60).toFixed(2));
+            const bill = calculateBill(energyKwh);
+
+            return [
+                {
+                    title: `${energyKwh} kWh`,
+                    start: item._id,
+                    extendedProps: {
+                        type: 'energy',
+                        samples: item.count,
+                        display_text: `${energyKwh} kWh`
+                    },
+                    backgroundColor: '#10b981',
+                    borderColor: '#059669'
+                },
+                {
+                    title: `฿${bill}`,
+                    start: item._id,
+                    extendedProps: {
+                        type: 'bill',
+                        display_text: `฿${bill}`
+                    },
+                    backgroundColor: '#3b82f6',
+                    borderColor: '#1e40af'
+                }
+            ];
+        });
+
+        res.json(events);
+
+    } catch (err) {
+        console.error('❌ /calendar error:', err);
+        res.status(500).json({ error: 'Failed to get calendar data', message: err.message });
+    }
 });
 
-// Start server
+
+// ================= 404 & Error Handler =================
+app.use((req, res) => {
+    res.status(404).json({
+        error: 'Endpoint not found',
+        available_endpoints: [
+            'GET /',
+            'GET /daily-bill?date=YYYY-MM-DD',
+            'GET /daily-bill/:date',
+            'GET /monthly-summary/:yearMonth',
+            'GET /monthly-calendar/:yearMonth'
+        ]
+    });
+});
+
+app.use((err, req, res, next) => {
+    console.error('❌ Unhandled error:', err);
+    res.status(500).json({ error: 'Internal server error', message: process.env.NODE_ENV === 'development' ? err.message : undefined });
+});
+
+// ================= Graceful Shutdown =================
+process.on('SIGTERM', async () => {
+    console.log('🔄 SIGTERM received, closing server...');
+    await mongoose.connection.close();
+    process.exit(0);
+});
+
+// ================= Start Server =================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📍 Health check: http://localhost:${PORT}/`);
 });
