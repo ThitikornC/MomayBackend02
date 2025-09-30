@@ -233,15 +233,14 @@ app.get('/calendar', async (req, res) => {
 
             return [
                 {
-                    title: `${energyKwh} kWh`,
+                    title: `${energyKwh} Unit`,
                     start: item._id,
                     extendedProps: {
                         type: 'energy',
                         samples: item.count,
-                        display_text: `${energyKwh} kWh`
+                        display_text: `${energyKwh} Unit`
                     },
-                    backgroundColor: '#10b981',
-                    borderColor: '#059669'
+                   
                 },
                 {
                     title: `฿${bill}`,
@@ -250,8 +249,7 @@ app.get('/calendar', async (req, res) => {
                         type: 'bill',
                         display_text: `฿${bill}`
                     },
-                    backgroundColor: '#3b82f6',
-                    borderColor: '#1e40af'
+                   
                 }
             ];
         });
