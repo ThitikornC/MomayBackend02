@@ -243,11 +243,11 @@ app.get('/calendar', async (req, res) => {
                    
                 },
                 {
-                    title: `฿${bill}`,
+                    title: `${bill}฿`,
                     start: item._id,
                     extendedProps: {
                         type: 'bill',
-                        display_text: `฿${bill}`
+                        display_text: `${bill}฿`
                     },
                    
                 }
