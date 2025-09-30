@@ -38,7 +38,7 @@ const px_dh_schema = new mongoose.Schema({
     voltage3: Number,
     voltageln: Number,
     voltagell: Number,
-    timestamp: { type: Date, default: Date.now }, // เก็บ UTC
+    timestamp: { type: Date, default: () => new Date(Date.now() + 7*60*60*1000) }, // UTC+7
 }, { timestamps: true });
 
 const PowerPXDH11 = mongoose.model("power_px_dh11", px_dh_schema);
@@ -48,9 +48,9 @@ function calculateBill(energyKwh, ratePerKwh = 4.4) {
     return Number((energyKwh * ratePerKwh).toFixed(2));
 }
 
-// แปลง YYYY-MM-DD เป็น UTC Date range
+// แปลง YYYY-MM-DD เป็น UTC+7 Date range
 function getDayRange(dateStr) {
-    const start = new Date(dateStr + "T00:00:00.000Z"); // ใช้ UTC ตรง ๆ
+    const start = new Date(dateStr + "T00:00:00.000Z"); // UTC
     const end = new Date(dateStr + "T23:59:59.999Z");
     return { start, end };
 }
@@ -70,7 +70,7 @@ app.get('/', (req, res) => {
     res.json({
         status: 'OK',
         service: 'px_dh Daily Bill API',
-        version: '1.0.3',
+        version: '1.0.4',
         timestamp: new Date().toISOString()
     });
 });
@@ -152,10 +152,7 @@ app.get('/monthly-summary/:yearMonth', async (req, res) => {
                 $project: {
                     power: 1,
                     localDate: {
-                        $dateToString: {
-                            format: "%Y-%m-%d",
-                            date: "$timestamp" // ใช้ UTC ตรง ๆ
-                        }
+                        $dateToString: { format: "%Y-%m-%d", date: "$timestamp" }
                     }
                 }
             },
@@ -207,7 +204,6 @@ app.get('/monthly-summary/:yearMonth', async (req, res) => {
 // ================= Monthly Calendar =================
 app.get('/calendar', async (req, res) => {
     try {
-        // ดึงข้อมูลทั้งหมด แต่จำกัด fields ที่ต้องใช้
         const agg = await PowerPXDH11.aggregate([
             {
                 $project: {
@@ -231,7 +227,6 @@ app.get('/calendar', async (req, res) => {
             return res.status(404).json({ error: 'No data found in database' });
         }
 
-        // สร้างสอง events ต่อวัน: kWh และ ค่าไฟ
         const events = agg.flatMap(item => {
             const energyKwh = Number((item.totalPowerSum / 60).toFixed(2));
             const bill = calculateBill(energyKwh);
@@ -269,7 +264,6 @@ app.get('/calendar', async (req, res) => {
     }
 });
 
-
 // ================= 404 & Error Handler =================
 app.use((req, res) => {
     res.status(404).json({
@@ -279,7 +273,7 @@ app.use((req, res) => {
             'GET /daily-bill?date=YYYY-MM-DD',
             'GET /daily-bill/:date',
             'GET /monthly-summary/:yearMonth',
-            'GET /monthly-calendar/:yearMonth'
+            'GET /calendar'
         ]
     });
 });
