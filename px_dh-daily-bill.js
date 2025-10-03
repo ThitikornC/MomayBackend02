@@ -141,154 +141,72 @@ app.get('/daily-bill/:date', async (req, res) => {
     return app._router.handle(req, res);
 });
 
-// ================= Monthly Summary =================
-app.get('/monthly-summary/:yearMonth', async (req, res) => {
-    try {
-        const yearMonth = req.params.yearMonth;
-        if (!/^\d{4}-\d{2}$/.test(yearMonth)) {
-            return res.status(400).json({ error: 'Invalid month format. Use YYYY-MM', example: '2025-09' });
-        }
-
-        const { start, end } = getMonthRange(yearMonth);
-
-        const agg = await PowerPXDH11.aggregate([
-            { $match: { timestamp: { $gte: start, $lt: end } } },
-            {
-                $project: {
-                    power: 1,
-                    localDate: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }
-                }
-            },
-            {
-                $group: {
-                    _id: "$localDate",
-                    totalPowerSum: { $sum: "$power" },
-                    count: { $sum: 1 }
-                }
-            },
-            { $sort: { "_id": 1 } }
-        ]);
-
-        if (!agg.length) {
-            return res.status(404).json({
-                error: `No data found for ${yearMonth}`,
-                month: yearMonth,
-                daily_summary: []
-            });
-        }
-
-        const dailySummary = [];
-        for (const item of agg) {
-            const dayData = await PowerPXDH11.find({
-                timestamp: {
-                    $gte: new Date(`${item._id}T00:00:00+07:00`),
-                    $lte: new Date(`${item._id}T23:59:59+07:00`)
-                }
-            }).sort({ timestamp: 1 }).select('power timestamp');
-
-            let totalEnergyKwh = 0;
-            let totalPower = 0;
-            let count = 0;
-            for (let i = 0; i < dayData.length; i++) {
-                const p = dayData[i].power;
-                totalPower += p;
-                count++;
-                if (i === 0) continue;
-                const intervalHours = (dayData[i].timestamp - dayData[i-1].timestamp) / 1000 / 3600;
-                totalEnergyKwh += ((dayData[i].power + dayData[i-1].power) / 2) * intervalHours;
-            }
-
-            dailySummary.push({
-                date: item._id,
-                samples: count,
-                total_energy_kwh: Number(totalEnergyKwh.toFixed(2)),
-                electricity_bill: calculateBill(totalEnergyKwh)
-            });
-        }
-
-        const monthTotal = dailySummary.reduce((sum, day) => sum + day.total_energy_kwh, 0);
-        const monthBill = calculateBill(monthTotal);
-
-        res.json({
-            month: yearMonth,
-            total_days: dailySummary.length,
-            total_energy_kwh: Number(monthTotal.toFixed(2)),
-            total_electricity_bill: monthBill,
-            daily_summary: dailySummary
-        });
-
-    } catch (err) {
-        console.error('❌ /monthly-summary error:', err);
-        res.status(500).json({ error: 'Failed to get monthly summary', message: err.message });
-    }
-});
-
-// ================= Monthly Calendar =================
+// ================= Daily Calendar =================
 app.get('/calendar', async (req, res) => {
-    try {
-        const agg = await PowerPXDH11.aggregate([
-            {
-                $project: {
-                    power: 1,
-                    localDate: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } },
-                    hour: { $hour: "$timestamp" },
-                    minute: { $minute: "$timestamp" }
-                }
-            },
-            { $sort: { localDate: 1, hour: 1, minute: 1 } }
-        ]);
-
-        if (!agg.length) {
-            return res.status(404).json({ error: 'No data found in database' });
+  try {
+    const agg = await PowerPXDH11.aggregate([
+      {
+        $project: {
+          power: 1,
+          localDate: {
+            $dateToString: { format: "%Y-%m-%d", date: "$timestamp", timezone: "UTC" }
+          }
         }
+      },
+      {
+        $group: {
+          _id: "$localDate",
+          avgPower: { $avg: "$power" }, // หรือจะใช้ sum แล้ว integrate ก็ได้
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
 
-        const quarterData = {};
-        agg.forEach(d => {
-            const quarter = Math.floor(d.minute / 15);
-            const key = `${d.localDate}-${d.hour}-${quarter}`;
-            if (!quarterData[key]) quarterData[key] = 0;
-            quarterData[key] += d.power;
-        });
+    if (!agg.length) return res.status(404).json({ error: "No data found" });
 
-        const hourlyData = {};
-        Object.keys(quarterData).forEach(k => {
-            const [date, hour] = k.split('-');
-            const key = `${date}-${hour}`;
-            if (!hourlyData[key]) hourlyData[key] = 0;
-            hourlyData[key] += quarterData[k];
-        });
+    const events = [];
 
-        const dailyData = {};
-        Object.keys(hourlyData).forEach(k => {
-            const date = k.split('-')[0];
-            if (!dailyData[date]) dailyData[date] = 0;
-            dailyData[date] += hourlyData[k];
-        });
+    for (const item of agg) {
+      // หา dayData ทั้งวันมา integrate หา kWh
+      const dayData = await PowerPXDH11.find({
+        timestamp: {
+          $gte: new Date(`${item._id}T00:00:00Z`),
+          $lt: new Date(`${item._id}T23:59:59Z`)
+        }
+      }).sort({ timestamp: 1 }).select("power timestamp");
 
-        const events = Object.keys(dailyData).flatMap(date => {
-            const energyKwh = Number((dailyData[date] / 60).toFixed(2));
-            const bill = calculateBill(energyKwh);
-            return [
-                {
-                    title: `${energyKwh} Unit`,
-                    start: date,
-                    extendedProps: { type: 'energy', display_text: `${energyKwh} Unit` }
-                },
-                {
-                    title: `${bill}฿`,
-                    start: date,
-                    extendedProps: { type: 'bill', display_text: `${bill}฿` }
-                }
-            ];
-        });
+      let totalEnergyKwh = 0;
+      for (let i = 1; i < dayData.length; i++) {
+        const p1 = dayData[i - 1].power;
+        const p2 = dayData[i].power;
+        const intervalHrs = (dayData[i].timestamp - dayData[i - 1].timestamp) / 1000 / 3600;
+        totalEnergyKwh += ((p1 + p2) / 2) * intervalHrs;
+      }
 
-        res.json(events);
+      totalEnergyKwh = Number(totalEnergyKwh.toFixed(2));
+      const bill = calculateBill(totalEnergyKwh);
 
-    } catch (err) {
-        console.error('❌ /calendar error:', err);
-        res.status(500).json({ error: 'Failed to get calendar data', message: err.message });
+      events.push({
+        title: `${totalEnergyKwh} Unit`,
+        start: item._id, // YYYY-MM-DD
+        extendedProps: { type: "energy", display_text: `${totalEnergyKwh} Unit` }
+      });
+
+      events.push({
+        title: `${bill}฿`,
+        start: item._id,
+        extendedProps: { type: "bill", display_text: `${bill}฿` }
+      });
     }
+
+    res.json(events);
+  } catch (err) {
+    console.error("❌ /calendar error:", err);
+    res.status(500).json({ error: "Failed to get calendar data", message: err.message });
+  }
 });
+
 
 // ================= Daily Diff =================
 app.get('/daily-diff', async (req, res) => {
