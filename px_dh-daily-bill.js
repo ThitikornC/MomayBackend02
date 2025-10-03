@@ -412,6 +412,61 @@ app.get('/hourly-summary', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+// ================= Solar Size =================
+app.get('/solar-size', async (req, res) => {
+    try {
+        const { date, ratePerKwh = 4.4 } = req.query;
+
+        if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            return res.status(400).json({ 
+                error: "Missing or invalid date. Use YYYY-MM-DD",
+                example: "/solar-size?date=2025-10-03"
+            });
+        }
+
+        // เรียก /hourly-bill เพื่อดึงข้อมูลพลังงานรายชั่วโมง
+        const hourlyResponse = await fetch(`http://localhost:3000/hourly-bill/${date}`);
+        if (!hourlyResponse.ok) {
+            const errMsg = await hourlyResponse.text();
+            return res.status(500).json({ error: "Failed to fetch hourly-bill", details: errMsg });
+        }
+        const hourlyData = await hourlyResponse.json();
+        if (!hourlyData.hourly || !hourlyData.hourly.length) {
+            return res.status(404).json({ error: `No hourly data for ${date}` });
+        }
+
+        // รวม energy เฉพาะชั่วโมง 06:00–18:00
+        const totalEnergyKwh = hourlyData.hourly
+            .filter(h => {
+                const hour = Number(h.hour.split(':')[0]);
+                return hour >= 6 && hour <= 18;
+            })
+            .reduce((sum, h) => sum + h.energy_kwh, 0);
+
+        const H_sun = 4; // peak sun hours
+        const solarCapacity_kW = totalEnergyKwh / H_sun;
+
+        const savingsDay = totalEnergyKwh * ratePerKwh;
+        const savingsMonth = savingsDay * 30;
+        const savingsYear = savingsDay * 365;
+
+        res.json({
+            date,
+            totalEnergyKwh: Number(totalEnergyKwh.toFixed(2)),
+            sunHours: H_sun,
+            solarCapacity_kW: Number(solarCapacity_kW.toFixed(2)),
+            savingsDay: Number(savingsDay.toFixed(2)),
+            savingsMonth: Number(savingsMonth.toFixed(2)),
+            savingsYear: Number(savingsYear.toFixed(2))
+        });
+
+    } catch (err) {
+        console.error('❌ /solar-size error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
 
 // ================= Diagnostics Range Endpoint =================
 app.get('/diagnostics-range', async (req, res) => {
