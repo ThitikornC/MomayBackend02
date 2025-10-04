@@ -419,38 +419,43 @@ app.get('/solar-size', async (req, res) => {
         const { date, ratePerKwh = 4.4 } = req.query;
 
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-            return res.status(400).json({
+            return res.status(400).json({ 
                 error: "Missing or invalid date. Use YYYY-MM-DD",
                 example: "/solar-size?date=2025-10-03"
             });
         }
 
-        // ดึงข้อมูลของวันนั้นจาก DB
+        // === ดึงข้อมูลพลังงานรายชั่วโมงจาก DB โดยตรงเหมือน /hourly-bill ===
         const { start, end } = getDayRangeUTC(date);
         const data = await PowerPXDH11.find({ timestamp: { $gte: start, $lte: end } })
                                       .sort({ timestamp: 1 })
-                                      .select('power timestamp');
+                                      .select('timestamp power');
 
         if (!data.length) {
-            return res.status(404).json({ error: `No data found for ${date}` });
+            return res.status(404).json({ 
+                error: `No data found for ${date}`,
+                date,
+                totalEnergyKwh: 0
+            });
         }
 
-        // สร้าง array 24 ชั่วโมง
-        const hourly = Array.from({ length: 24 }, (_, i) => ({ hour: i, energy_kwh: 0 }));
-
+        // === รวม energy รายชั่วโมงเหมือน /hourly-bill ===
+        const hourlyEnergy = {};
         for (let i = 1; i < data.length; i++) {
             const prev = data[i-1];
             const curr = data[i];
-            const intervalHrs = (curr.timestamp - prev.timestamp) / 1000 / 3600;
+
+            const intervalHours = (curr.timestamp - prev.timestamp) / 1000 / 3600;
             const avgPower = (curr.power + prev.power) / 2;
-            const hour = prev.timestamp.getUTCHours();
-            hourly[hour].energy_kwh += avgPower * intervalHrs;
+            const hourKey = prev.timestamp.getHours(); // ใช้ local hour เหมือน /hourly-bill
+            if (!hourlyEnergy[hourKey]) hourlyEnergy[hourKey] = 0;
+            hourlyEnergy[hourKey] += avgPower * intervalHours;
         }
 
         // รวม energy เฉพาะชั่วโมง 06:00–18:00
-        const totalEnergyKwh = hourly
-            .filter(h => h.hour >= 6 && h.hour <= 18)
-            .reduce((sum, h) => sum + h.energy_kwh, 0);
+        const totalEnergyKwh = Object.keys(hourlyEnergy)
+            .filter(h => Number(h) >= 6 && Number(h) <= 18)
+            .reduce((sum, h) => sum + hourlyEnergy[h], 0);
 
         const H_sun = 4; // peak sun hours
         const solarCapacity_kW = totalEnergyKwh / H_sun;
