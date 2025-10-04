@@ -413,10 +413,10 @@ app.get('/hourly-summary', async (req, res) => {
     }
 });
 
+// ================= Solar Size =================
 app.get('/solar-size', async (req, res) => {
     try {
         const { date, ratePerKwh = 4.4 } = req.query;
-
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
             return res.status(400).json({ 
                 error: "Missing or invalid date. Use YYYY-MM-DD",
@@ -429,9 +429,15 @@ app.get('/solar-size', async (req, res) => {
                                       .sort({ timestamp: 1 })
                                       .select('timestamp power');
 
-        if (!data.length) return res.status(404).json({ error: `No data for ${date}` });
+        if (!data.length) {
+            return res.status(404).json({ 
+                error: `No data found for ${date}`,
+                date,
+                totalEnergyKwh: 0
+            });
+        }
 
-        // === รวม energy แบบ /hourly-bill ===
+        // รวม energy รายชั่วโมงแบบ /hourly-bill (local hour)
         const hourlyEnergy = {};
         for (let i = 1; i < data.length; i++) {
             const prev = data[i-1];
@@ -439,19 +445,18 @@ app.get('/solar-size', async (req, res) => {
             const intervalHours = (curr.timestamp - prev.timestamp) / 1000 / 3600;
             const avgPower = (curr.power + prev.power) / 2;
 
-            const hourKey = prev.timestamp.getUTCHours(); // ใช้ UTC ตาม DB
+            const hourKey = prev.timestamp.getHours(); // local hour
             if (!hourlyEnergy[hourKey]) hourlyEnergy[hourKey] = 0;
             hourlyEnergy[hourKey] += avgPower * intervalHours;
         }
 
-        // รวม energy เฉพาะชั่วโมง 06:00–18:00 (UTC)
+        // รวม energy เฉพาะชั่วโมง 06:00–18:00 (local)
         const totalEnergyKwh = Object.keys(hourlyEnergy)
             .filter(h => Number(h) >= 6 && Number(h) <= 18)
             .reduce((sum, h) => sum + hourlyEnergy[h], 0);
 
-        const H_sun = 4; // peak sun hours
+        const H_sun = 4;
         const solarCapacity_kW = totalEnergyKwh / H_sun;
-
         const savingsDay = totalEnergyKwh * ratePerKwh;
         const savingsMonth = savingsDay * 30;
         const savingsYear = savingsDay * 365;
