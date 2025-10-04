@@ -413,10 +413,7 @@ app.get('/hourly-summary', async (req, res) => {
     }
 });
 
-
 // ================= Solar Size =================
-const axios = require('axios');
-
 app.get('/solar-size', async (req, res) => {
     try {
         const { date, ratePerKwh = 4.4 } = req.query;
@@ -428,21 +425,31 @@ app.get('/solar-size', async (req, res) => {
             });
         }
 
-        // ใช้ PORT ของ server เอง
-        const PORT = process.env.PORT || 3000;
-        const hourlyResponse = await axios.get(`http://localhost:${PORT}/hourly-bill/${date}`, { timeout: 5000 });
+        // ดึงข้อมูลของวันนั้นจาก DB
+        const { start, end } = getDayRangeUTC(date);
+        const data = await PowerPXDH11.find({ timestamp: { $gte: start, $lte: end } })
+                                      .sort({ timestamp: 1 })
+                                      .select('power timestamp');
 
-        const hourlyData = hourlyResponse.data;
-        if (!hourlyData.hourly || !hourlyData.hourly.length) {
-            return res.status(404).json({ error: `No hourly data for ${date}` });
+        if (!data.length) {
+            return res.status(404).json({ error: `No data found for ${date}` });
+        }
+
+        // สร้าง array 24 ชั่วโมง
+        const hourly = Array.from({ length: 24 }, (_, i) => ({ hour: i, energy_kwh: 0 }));
+
+        for (let i = 1; i < data.length; i++) {
+            const prev = data[i-1];
+            const curr = data[i];
+            const intervalHrs = (curr.timestamp - prev.timestamp) / 1000 / 3600;
+            const avgPower = (curr.power + prev.power) / 2;
+            const hour = prev.timestamp.getUTCHours();
+            hourly[hour].energy_kwh += avgPower * intervalHrs;
         }
 
         // รวม energy เฉพาะชั่วโมง 06:00–18:00
-        const totalEnergyKwh = hourlyData.hourly
-            .filter(h => {
-                const hour = Number(h.hour.split(':')[0]);
-                return hour >= 6 && hour <= 18;
-            })
+        const totalEnergyKwh = hourly
+            .filter(h => h.hour >= 6 && h.hour <= 18)
             .reduce((sum, h) => sum + h.energy_kwh, 0);
 
         const H_sun = 4; // peak sun hours
@@ -467,7 +474,6 @@ app.get('/solar-size', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
-
 
 // ================= Diagnostics Range Endpoint =================
 app.get('/diagnostics-range', async (req, res) => {
