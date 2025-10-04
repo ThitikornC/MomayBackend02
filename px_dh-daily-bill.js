@@ -48,7 +48,6 @@ function calculateBill(energyKwh, ratePerKwh = 4.4) {
     return Number((energyKwh * ratePerKwh).toFixed(2));
 }
 
-
 function getDayRangeUTC(dateStr) {
     const start = new Date(`${dateStr}T00:00:00Z`);
     const end = new Date(`${dateStr}T23:59:59Z`);
@@ -156,7 +155,7 @@ app.get('/calendar', async (req, res) => {
       {
         $group: {
           _id: "$localDate",
-          avgPower: { $avg: "$power" }, // หรือจะใช้ sum แล้ว integrate ก็ได้
+          avgPower: { $avg: "$power" },
           count: { $sum: 1 }
         }
       },
@@ -189,7 +188,7 @@ app.get('/calendar', async (req, res) => {
 
       events.push({
         title: `${totalEnergyKwh} Unit`,
-        start: item._id, // YYYY-MM-DD
+        start: item._id,
         extendedProps: { type: "energy", display_text: `${totalEnergyKwh} Unit` }
       });
 
@@ -206,7 +205,6 @@ app.get('/calendar', async (req, res) => {
     res.status(500).json({ error: "Failed to get calendar data", message: err.message });
   }
 });
-
 
 // ================= Daily Diff =================
 app.get('/daily-diff', async (req, res) => {
@@ -316,6 +314,7 @@ app.get('/hourly-bill/:date', async (req, res) => {
         res.status(500).json({ error: 'Failed to get hourly bill', message: err.message });
     }
 });
+
 // ================= Minute Power Range with custom time range =================
 app.get('/minute-power-range', async (req, res) => {
     try {
@@ -357,6 +356,7 @@ app.get('/minute-power-range', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 // ================= Hourly kWh & Bill =================
 app.get('/hourly-summary', async (req, res) => {
     try {
@@ -412,6 +412,7 @@ app.get('/hourly-summary', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 // ================= Solar Size =================
 app.get('/solar-size', async (req, res) => {
     try {
@@ -466,8 +467,6 @@ app.get('/solar-size', async (req, res) => {
     }
 });
 
-
-
 // ================= Diagnostics Range Endpoint =================
 app.get('/diagnostics-range', async (req, res) => {
   try {
@@ -508,8 +507,6 @@ app.get('/diagnostics-range', async (req, res) => {
     res.status(500).json({ error: "Failed", message: err.message });
   }
 });
-
-
 
 // ================= Graceful Shutdown =================
 process.on('SIGTERM', async () => {
