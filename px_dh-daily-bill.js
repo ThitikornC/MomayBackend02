@@ -426,7 +426,7 @@ app.get('/solar-size', async (req, res) => {
         }
 
         // เรียก /hourly-bill เพื่อดึงข้อมูลพลังงานรายชั่วโมง
-        const hourlyResponse = await fetch(`http://localhost:3000/hourly-bill/${date}`);
+        const hourlyResponse = await fetch(`https://api-kx4r63rdjq-an.a.run.app/hourly-bill/${date}`);
         if (!hourlyResponse.ok) {
             const errMsg = await hourlyResponse.text();
             return res.status(500).json({ error: "Failed to fetch hourly-bill", details: errMsg });
