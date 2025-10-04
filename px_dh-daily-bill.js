@@ -413,25 +413,26 @@ app.get('/hourly-summary', async (req, res) => {
     }
 });
 
+
 // ================= Solar Size =================
+const axios = require('axios');
+
 app.get('/solar-size', async (req, res) => {
     try {
         const { date, ratePerKwh = 4.4 } = req.query;
 
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 error: "Missing or invalid date. Use YYYY-MM-DD",
                 example: "/solar-size?date=2025-10-03"
             });
         }
 
-        // เรียก /hourly-bill เพื่อดึงข้อมูลพลังงานรายชั่วโมง
-        const hourlyResponse = await fetch(`https://api-kx4r63rdjq-an.a.run.app/hourly-bill/${date}`);
-        if (!hourlyResponse.ok) {
-            const errMsg = await hourlyResponse.text();
-            return res.status(500).json({ error: "Failed to fetch hourly-bill", details: errMsg });
-        }
-        const hourlyData = await hourlyResponse.json();
+        // ใช้ PORT ของ server เอง
+        const PORT = process.env.PORT || 3000;
+        const hourlyResponse = await axios.get(`http://localhost:${PORT}/hourly-bill/${date}`, { timeout: 5000 });
+
+        const hourlyData = hourlyResponse.data;
         if (!hourlyData.hourly || !hourlyData.hourly.length) {
             return res.status(404).json({ error: `No hourly data for ${date}` });
         }
@@ -466,6 +467,7 @@ app.get('/solar-size', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 // ================= Diagnostics Range Endpoint =================
 app.get('/diagnostics-range', async (req, res) => {
