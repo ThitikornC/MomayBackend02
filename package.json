@@ -11,9 +11,11 @@
   "description": "",
   "dependencies": {
     "axios": "^1.12.2",
+    "connect-mongo": "^5.1.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "express-session": "^1.18.2",
     "mongoose": "^8.18.2",
     "node-cron": "^4.2.1",
     "ws": "^8.18.3"

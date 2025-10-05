@@ -243,8 +243,8 @@ app.get('/daily-diff', async (req, res) => {
         const yestData = await getDailyEnergy(formatDate(yesterday));
         const dayBeforeData = await getDailyEnergy(formatDate(dayBefore));
 
-        const diffKwh = Number((yestData.energy_kwh - dayBeforeData.energy_kwh).toFixed(2));
-        const diffBill = Number((yestData.electricity_bill - dayBeforeData.electricity_bill).toFixed(2));
+        const diffKwh = Number((dayBeforeData.energy_kwh - yestData.energy_kwh ).toFixed(2));
+        const diffBill = Number((dayBeforeData.electricity_bill - yestData.electricity_bill).toFixed(2));
 
         res.json({
             yesterday: { date: formatDate(yesterday), ...yestData },
@@ -412,6 +412,47 @@ app.get('/hourly-summary', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+// ================= Session =================
+const session = require('express-session');
+const MongoStore = require('connect-mongo');
+
+app.use(session({
+    secret: process.env.SESSION_SECRET || 'keyboard_cat',
+    resave: false,
+    saveUninitialized: false,
+    store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI }),
+    cookie: { maxAge: 24*60*60*1000 } // 1 วัน
+}));
+
+// ================= Daily Diff Popup =================
+app.get('/daily-diff-popup', async (req, res) => {
+    try {
+        const todayStr = new Date().toISOString().split('T')[0];
+
+        // ถ้ายังไม่เคยโชว์วันนี้
+        if (!req.session.lastPopupDate || req.session.lastPopupDate !== todayStr) {
+            // เรียก daily-diff เดิม
+            const axios = require('axios');
+            const diffResp = await axios.get(`http://localhost:${PORT}/daily-diff`);
+
+            // บันทึกวันที่ล่าสุดใน session
+            req.session.lastPopupDate = todayStr;
+
+            return res.json({
+                showPopup: true,
+                data: diffResp.data
+            });
+        }
+
+        // เคยโชว์แล้ววันนี้
+        res.json({ showPopup: false });
+
+    } catch (err) {
+        console.error('❌ /daily-diff-popup error:', err.message);
+        res.status(500).json({ showPopup: false, error: err.message });
+    }
+});
+
 
 // ================= Solar Size =================
 app.get('/solar-size', async (req, res) => {
