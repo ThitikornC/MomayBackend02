@@ -490,7 +490,7 @@ app.get('/solar-size', async (req, res) => {
             const avgPower = (curr.power + prev.power) / 2;
 
             // แปลง timestamp เป็นเวลาไทยตรงๆ
-            const prevTHHour = (prev.timestamp.getUTCHours()) % 24;
+            const prevTHHour = (prev.timestamp.getUTCHours() + 7) % 24;
 
             if (!hourlyEnergy[prevTHHour]) hourlyEnergy[prevTHHour] = 0;
             hourlyEnergy[prevTHHour] += avgPower * intervalHours;
