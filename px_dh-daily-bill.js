@@ -524,6 +524,7 @@ app.get('/solar-size', async (req, res) => {
     }
 });
 
+
 // ================= Diagnostics Range Endpoint =================
 app.get('/diagnostics-range', async (req, res) => {
   try {
@@ -563,6 +564,81 @@ app.get('/diagnostics-range', async (req, res) => {
     console.error('❌ /diagnostics-range error:', err);
     res.status(500).json({ error: "Failed", message: err.message });
   }
+});
+// ================== PUSH NOTIFICATION SYSTEM ==================
+const webpush = require('web-push');
+const cron = require('node-cron');
+
+// ตั้งค่า VAPID Key (ใช้คู่ที่คุณให้ไว้)
+webpush.setVapidDetails(
+  'mailto:admin@yourdomain.com',
+  'BB2fZ3NOzkWDKOi8H5jhbwICDTv760wIB6ZD2PwmXcUA_B5QXkXtely4b4JZ5v5b88VX1jKa7kRfr94nxqiksqY',
+  'jURJII6DrBN9N_8WtNayWs4bXWDNzeb_RyjXnTxaDmo'
+);
+
+let pushSubscriptions = [];
+
+// สมัครรับการแจ้งเตือน
+app.post('/api/subscribe', (req, res) => {
+  const sub = req.body;
+  if (!sub || !sub.endpoint) {
+    return res.status(400).json({ error: 'Invalid subscription' });
+  }
+
+  // ป้องกันซ้ำ
+  const exists = pushSubscriptions.find(s => s.endpoint === sub.endpoint);
+  if (!exists) pushSubscriptions.push(sub);
+
+  console.log(`✅ Push subscription added (${pushSubscriptions.length} total)`);
+  res.status(201).json({ message: 'Subscribed successfully' });
+});
+
+// ฟังก์ชันส่งแจ้งเตือน
+function sendPushNotification(title, body) {
+  const payload = JSON.stringify({ title, body });
+  pushSubscriptions.forEach(sub => {
+    webpush.sendNotification(sub, payload).catch(err => {
+      console.error('❌ Push send error:', err.statusCode);
+    });
+  });
+}
+
+// ================== REALTIME PEAK CHECK ==================
+// เก็บค่า peak สูงสุดของวันไว้ใน memory
+let dailyPeak = { date: '', maxPower: 0 };
+
+async function checkDailyPeak() {
+  try {
+    const latest = await PowerPXDH11.findOne().sort({ timestamp: -1 }).select('power timestamp');
+    if (!latest) return;
+
+    const today = new Date().toISOString().split('T')[0];
+
+    // รีเซ็ตค่าเมื่อเข้าเช้าวันใหม่
+    if (dailyPeak.date !== today) {
+      dailyPeak = { date: today, maxPower: 0 };
+      console.log(`🔁 Reset daily peak for ${today}`);
+    }
+
+    const powerNow = latest.power || 0;
+    if (powerNow > dailyPeak.maxPower) {
+      dailyPeak.maxPower = powerNow;
+         console.log(`🚨 New peak ${powerNow.toFixed(2)} W at ${latest.timestamp}`);
+
+      // ส่ง Push notification
+      sendPushNotification(
+        '⚡ New Daily Peak!',
+        `Current peak power is ${powerNow.toFixed(2)} W`
+      );
+    }
+  } catch (err) {
+    console.error('❌ Error checking daily peak:', err);
+  }
+}
+
+// ตั้งเวลาตรวจสอบ peak ทุก 10 วินาที (ปรับได้ตามต้องการ)
+cron.schedule('*/10 * * * * *', () => {
+  checkDailyPeak();
 });
 
 // ================= Graceful Shutdown =================
