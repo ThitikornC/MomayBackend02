@@ -517,13 +517,16 @@ app.get('/solar-size', async (req, res) => {
             });
         }
 
-        const start = new Date(`${date}T00:00:00`);
-        const end = new Date(`${date}T23:59:59`);
-        const now = new Date(); // เวลาปัจจุบัน
+        // แปลงเป็นเวลาไทย (+07:00)
+        const start = new Date(`${date}T00:00:00+07:00`);
+        const end = new Date(`${date}T23:59:59+07:00`);
+        const now = new Date(); // เวลาปัจจุบันของระบบ (อาจเป็น UTC)
 
-        const data = await PowerPXDH11.find({ timestamp: { $gte: start, $lte: end } })
-                                      .sort({ timestamp: 1 })
-                                      .select('timestamp power');
+        const data = await PowerPXDH11.find({
+            timestamp: { $gte: start, $lte: end }
+        })
+        .sort({ timestamp: 1 })
+        .select('timestamp power');
 
         if (!data.length) {
             return res.status(404).json({ 
@@ -554,8 +557,9 @@ app.get('/solar-size', async (req, res) => {
                 if (intervalEnd <= startTime) break;
 
                 const intervalHours = (intervalEnd - startTime) / 1000 / 3600;
-                const hour = startTime.getHours();
-                hourlyEnergy[hour] += avgPower * intervalHours;
+                const hour = startTime.getUTCHours() + 7; // 👉 บวก 7 ชั่วโมงเป็นเวลาไทย
+                const hourIndex = (hour + 24) % 24;
+                hourlyEnergy[hourIndex] += avgPower * intervalHours;
 
                 startTime = intervalEnd;
             }
@@ -565,14 +569,12 @@ app.get('/solar-size', async (req, res) => {
             addEnergy(data[i-1], data[i]);
         }
 
-        // สร้าง array รายชั่วโมง 0–23
         const hourlyArray = hourlyEnergy.map((energy, h) => ({
             hour: `${h.toString().padStart(2,'0')}:00`,
             energy_kwh: Number(energy.toFixed(2)),
             electricity_bill: Number((energy * ratePerKwh).toFixed(2))
         }));
 
-        // รวม energy เฉพาะชั่วโมง 06:00–18:00
         const totalEnergyKwh = hourlyArray
             .filter(o => {
                 const h = Number(o.hour.split(':')[0]);
@@ -580,7 +582,7 @@ app.get('/solar-size', async (req, res) => {
             })
             .reduce((sum, o) => sum + o.energy_kwh, 0);
 
-        const H_sun = 4; // peak sun hours
+        const H_sun = 4;
         const solarCapacity_kW = totalEnergyKwh / H_sun;
         const savingsDay = totalEnergyKwh * ratePerKwh;
 
@@ -591,8 +593,8 @@ app.get('/solar-size', async (req, res) => {
             sunHours: H_sun,
             solarCapacity_kW: Number(solarCapacity_kW.toFixed(2)),
             savingsDay: Number(savingsDay.toFixed(2)),
-            savingsMonth: Number((savingsDay*30).toFixed(2)),
-            savingsYear: Number((savingsDay*365).toFixed(2))
+            savingsMonth: Number((savingsDay * 30).toFixed(2)),
+            savingsYear: Number((savingsDay * 365).toFixed(2))
         });
 
     } catch (err) {
@@ -600,6 +602,7 @@ app.get('/solar-size', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 // ================= Diagnostics Range Endpoint =================
 app.get('/diagnostics-range', async (req, res) => {
