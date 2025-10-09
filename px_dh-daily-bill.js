@@ -569,7 +569,6 @@ app.get('/diagnostics-range', async (req, res) => {
 const webpush = require('web-push');
 const cron = require('node-cron');
 
-// ตั้งค่า VAPID Key (ใช้คู่ที่คุณให้ไว้)
 webpush.setVapidDetails(
   'mailto:admin@yourdomain.com',
   'BB2fZ3NOzkWDKOi8H5jhbwICDTv760wIB6ZD2PwmXcUA_B5QXkXtely4b4JZ5v5b88VX1jKa7kRfr94nxqiksqY',
@@ -593,15 +592,42 @@ app.post('/api/subscribe', (req, res) => {
   res.status(201).json({ message: 'Subscribed successfully' });
 });
 
-// ฟังก์ชันส่งแจ้งเตือน
-function sendPushNotification(title, body) {
-  const payload = JSON.stringify({ title, body });
-  pushSubscriptions.forEach(sub => {
-    webpush.sendNotification(sub, payload).catch(err => {
-      console.error('❌ Push send error:', err.statusCode);
+// ------------------ TEST PUSH (ต้องอยู่นอก /api/subscribe) ------------------
+app.get('/api/test-push', (req, res) => {
+  sendPushNotification('🔔 Test Push', 'การแจ้งเตือนทดสอบทำงานแล้ว!')
+    .then(() => res.send('✅ Push sent (if any subscriptions exist)'))
+    .catch(err => {
+      console.error('❌ test-push error:', err);
+      res.status(500).send('❌ Failed to send test push');
     });
-  });
+});
+
+// ปรับปรุงฟังก์ชันส่งแจ้งเตือนให้จัดการ error และลบ subscription หมดอายุ
+async function sendPushNotification(title, body) {
+  const payload = JSON.stringify({ title, body, url: '/' });
+
+  if (!pushSubscriptions.length) {
+    console.log('⚠️ No push subscriptions to send to');
+    return;
+  }
+
+  for (let i = pushSubscriptions.length - 1; i >= 0; i--) {
+    const sub = pushSubscriptions[i];
+    try {
+      await webpush.sendNotification(sub, payload);
+      console.log('📤 Sent notification to', sub.endpoint);
+    } catch (err) {
+      console.error('❌ Push send error for', sub.endpoint, err.statusCode || err);
+      // ลบ subscription ถ้า expired (410) หรือ not found (404)
+      const status = err && err.statusCode;
+      if (status === 410 || status === 404) {
+        pushSubscriptions.splice(i, 1);
+        console.log('🗑 Removed expired subscription', sub.endpoint);
+      }
+    }
+  }
 }
+
 
 // ================== REALTIME PEAK CHECK ==================
 // เก็บค่า peak สูงสุดของวันไว้ใน memory
@@ -623,12 +649,12 @@ async function checkDailyPeak() {
     const powerNow = latest.power || 0;
     if (powerNow > dailyPeak.maxPower) {
       dailyPeak.maxPower = powerNow;
-         console.log(`🚨 New peak ${powerNow.toFixed(2)} W at ${latest.timestamp}`);
+         console.log(`🚨 New peak ${powerNow.toFixed(2)} kW at ${latest.timestamp}`);
 
       // ส่ง Push notification
       sendPushNotification(
         '⚡ New Daily Peak!',
-        `Current peak power is ${powerNow.toFixed(2)} W`
+        `Current peak power is ${powerNow.toFixed(2)} kW`
       );
     }
   } catch (err) {
