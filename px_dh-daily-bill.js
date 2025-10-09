@@ -505,7 +505,7 @@ app.get('/daily-diff-popup', async (req, res) => {
 });
 
 
-// ================= Solar Size =================
+// ================= Solar Size (UTC, no conversion, 06:00–18:00) =================
 app.get('/solar-size', async (req, res) => {
     try {
         const { date, ratePerKwh = 4.4 } = req.query;
@@ -513,28 +513,25 @@ app.get('/solar-size', async (req, res) => {
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
             return res.status(400).json({ 
                 error: "Missing or invalid date. Use YYYY-MM-DD",
-                example: "/solar-size?date=2025-10-03"
+                example: "/solar-size-utc?date=2025-10-07"
             });
         }
 
-        // แปลงเป็นเวลาไทย (+07:00)
-        const start = new Date(`${date}T00:00:00+07:00`);
-        const end = new Date(`${date}T23:59:59+07:00`);
-        const now = new Date(); // เวลาปัจจุบันของระบบ (อาจเป็น UTC)
+        const start = new Date(`${date}T00:00:00Z`);
+        const end = new Date(`${date}T23:59:59Z`);
 
+        // ดึงข้อมูลทั้งวัน
         const data = await PowerPXDH11.find({
             timestamp: { $gte: start, $lte: end }
-        })
-        .sort({ timestamp: 1 })
-        .select('timestamp power');
+        }).sort({ timestamp: 1 }).select('timestamp power');
 
         if (!data.length) {
-            return res.status(404).json({ 
-                error: `No data found for ${date}`,
+            return res.status(404).json({
+                error: `No data for ${date}`,
                 date,
-                hourly: Array.from({length:24}, (_,h)=>({
-                    hour: `${h.toString().padStart(2,'0')}:00`, 
-                    energy_kwh: 0, 
+                hourly: Array.from({length:24}, (_,h) => ({
+                    hour: `${h.toString().padStart(2,'0')}:00`,
+                    energy_kwh: 0,
                     electricity_bill: 0
                 })),
                 totalEnergyKwh: 0
@@ -543,46 +540,36 @@ app.get('/solar-size', async (req, res) => {
 
         const hourlyEnergy = Array.from({length:24}, () => 0);
 
-        function addEnergy(prev, curr) {
-            let startTime = new Date(prev.timestamp);
+        for (let i = 1; i < data.length; i++) {
+            const prev = data[i-1];
+            const curr = data[i];
+            let t = new Date(prev.timestamp);
             const endTime = new Date(curr.timestamp);
             const avgPower = (prev.power + curr.power) / 2;
 
-            while (startTime < endTime) {
-                const nextHour = new Date(startTime);
-                nextHour.setMinutes(60,0,0);
-                let intervalEnd = nextHour < endTime ? nextHour : endTime;
-
-                if (intervalEnd > now) intervalEnd = now;
-                if (intervalEnd <= startTime) break;
-
-                const intervalHours = (intervalEnd - startTime) / 1000 / 3600;
-                const hour = startTime.getUTCHours() + 7; // 👉 บวก 7 ชั่วโมงเป็นเวลาไทย
-                const hourIndex = (hour + 24) % 24;
+            while (t < endTime) {
+                const hourIndex = t.getUTCHours();
+                const nextHour = new Date(t);
+                nextHour.setUTCHours(nextHour.getUTCHours()+1,0,0,0);
+                const intervalEnd = nextHour < endTime ? nextHour : endTime;
+                const intervalHours = (intervalEnd - t) / 1000 / 3600;
                 hourlyEnergy[hourIndex] += avgPower * intervalHours;
-
-                startTime = intervalEnd;
+                t = intervalEnd;
             }
         }
 
-        for (let i = 1; i < data.length; i++) {
-            addEnergy(data[i-1], data[i]);
-        }
-
-        const hourlyArray = hourlyEnergy.map((energy, h) => ({
+        const hourlyArray = hourlyEnergy.map((energy,h) => ({
             hour: `${h.toString().padStart(2,'0')}:00`,
             energy_kwh: Number(energy.toFixed(2)),
-            electricity_bill: Number((energy * ratePerKwh).toFixed(2))
+            electricity_bill: Number((energy*ratePerKwh).toFixed(2))
         }));
 
+        // รวมพลังงานเฉพาะ 06:00–18:00
         const totalEnergyKwh = hourlyArray
-            .filter(o => {
-                const h = Number(o.hour.split(':')[0]);
-                return h >= 6 && h <= 18;
-            })
-            .reduce((sum, o) => sum + o.energy_kwh, 0);
+            .slice(6, 19) // index 6–18 รวม 06:00–18:00
+            .reduce((sum,o) => sum + o.energy_kwh, 0);
 
-        const H_sun = 4;
+        const H_sun = 4; // ใช้ค่าคงที่
         const solarCapacity_kW = totalEnergyKwh / H_sun;
         const savingsDay = totalEnergyKwh * ratePerKwh;
 
@@ -593,14 +580,74 @@ app.get('/solar-size', async (req, res) => {
             sunHours: H_sun,
             solarCapacity_kW: Number(solarCapacity_kW.toFixed(2)),
             savingsDay: Number(savingsDay.toFixed(2)),
-            savingsMonth: Number((savingsDay * 30).toFixed(2)),
-            savingsYear: Number((savingsDay * 365).toFixed(2))
+            savingsMonth: Number((savingsDay*30).toFixed(2)),
+            savingsYear: Number((savingsDay*365).toFixed(2))
         });
 
     } catch (err) {
-        console.error('❌ /solar-size error:', err);
+        console.error(err);
         res.status(500).json({ error: err.message });
     }
+});
+
+// ================= Route raw-local =================
+app.get('/raw-local', async (req, res) => {
+  try {
+    const { date } = req.query; // เช่น "2025-10-07"
+    if (!date) return res.status(400).json({ error: 'Missing date' });
+
+    // เวลา 08:00-09:00 local/DB (UTC+7)
+    const start = new Date(`${date}T08:00:00+07:00`);
+    const end   = new Date(`${date}T09:00:00+07:00`);
+
+    const data = await PowerPXDH11.find({
+      timestamp: { $gte: start, $lte: end }
+    }).sort({ timestamp: 1 });
+
+    const totalPower = data.reduce((sum, d) => sum + d.power, 0);
+
+    res.json({
+      date,
+      period: "08:00-09:00",
+      count: data.length,
+      totalPower: Number(totalPower.toFixed(3)),
+      data
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/raw-08-09', async (req, res) => {
+  try {
+    const { date } = req.query;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: "Invalid date. Use YYYY-MM-DD" });
+    }
+
+    // เวลา UTC 08:00-09:00 ตาม DB
+    const start = new Date(`${date}T08:00:00.000Z`);
+    const end = new Date(`${date}T08:59:59.999Z`);
+
+    const data = await PowerPXDH11.find({
+      timestamp: { $gte: start, $lte: end }
+    }).sort({ timestamp: 1 });
+
+    const totalPower = data.reduce((sum, d) => sum + d.power, 0);
+
+    res.json({
+      date,
+      period: "08:00-09:00 UTC",
+      count: data.length,
+      totalPower: Number(totalPower.toFixed(3)),
+      data // timestamp จะตรงกับ DB จริง ๆ เลย
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
