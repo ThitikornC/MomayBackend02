@@ -53,7 +53,14 @@ function getDayRangeUTC(dateStr) {
     const end = new Date(`${dateStr}T23:59:59Z`);
     return { start, end };
 }
-
+function getDayRangeUTCFromThailand(dateStr) {
+    // เวลาไทย
+    const startTH = new Date(`${dateStr}T00:00:00`);
+    const endTH = new Date(`${dateStr}T23:59:59`);
+    // แปลงเป็น UTC
+    return { start: new Date(startTH.getTime() - 7*3600*1000),
+             end: new Date(endTH.getTime() - 7*3600*1000) };
+}
 // แปลง YYYY-MM เป็น UTC month range
 function getMonthRange(yearMonth) {
     const start = new Date(`${yearMonth}-01T00:00:00Z`);
@@ -258,6 +265,26 @@ app.get('/daily-diff', async (req, res) => {
     }
 });
 
+// ฟังก์ชันช่วยกระจาย energy ตามชั่วโมง
+function addEnergyToHours(prev, curr, hourlyEnergy) {
+    let start = new Date(prev.timestamp);
+    const end = new Date(curr.timestamp);
+    const power = (prev.power + curr.power) / 2;
+
+    while (start < end) {
+        const nextHour = new Date(start);
+        nextHour.setMinutes(60, 0, 0); // ชั่วโมงถัดไป
+        const intervalEnd = nextHour < end ? nextHour : end;
+        const intervalHours = (intervalEnd - start) / 1000 / 3600;
+
+        const hourKey = start.getHours(); // ใช้เวลาไทยตรง ๆ
+        if (!hourlyEnergy[hourKey]) hourlyEnergy[hourKey] = 0;
+        hourlyEnergy[hourKey] += power * intervalHours;
+
+        start = intervalEnd;
+    }
+}
+
 // ================= Hourly Bill =================
 app.get('/hourly-bill/:date', async (req, res) => {
     try {
@@ -266,43 +293,65 @@ app.get('/hourly-bill/:date', async (req, res) => {
             return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
         }
 
-        const { start, end } = getDayRangeUTC(selectedDate);
+        // query ตามวัน (เวลาไทยตรง ๆ)
+        const start = new Date(`${selectedDate}T00:00:00`);
+        const end = new Date(`${selectedDate}T23:59:59`);
 
         const data = await PowerPXDH11.find({ timestamp: { $gte: start, $lte: end } })
                                       .sort({ timestamp: 1 })
                                       .select('power timestamp');
 
-        if (!data.length) {
-            return res.status(404).json({
-                error: `No data found for ${selectedDate}`,
+        // เตรียม array ของ 24 ชั่วโมง
+        const hourlyEnergy = Array.from({length:24}, ()=>0);
+
+        if (data.length === 0) {
+            // ถ้าไม่มีข้อมูล ให้คืนค่า 0 ทั้งหมด
+            return res.json({
                 date: selectedDate,
-                hourly: []
+                hourly: hourlyEnergy.map((e,h)=>({
+                    hour: `${h.toString().padStart(2,'0')}:00`,
+                    energy_kwh: 0,
+                    electricity_bill: 0
+                }))
             });
         }
 
-        const hourlyEnergy = {};
+        // ฟังก์ชันกระจาย energy ตามชั่วโมงจริง
+        function addEnergy(prev, curr) {
+            let startTime = new Date(prev.timestamp);
+            const endTime = new Date(curr.timestamp);
+            const avgPower = (prev.power + curr.power)/2; // kW
+
+            while (startTime < endTime) {
+                const nextHour = new Date(startTime);
+                nextHour.setMinutes(60,0,0); // จุดสิ้นสุดของชั่วโมงปัจจุบัน
+                const intervalEnd = nextHour < endTime ? nextHour : endTime;
+                const intervalHours = (intervalEnd - startTime)/1000/3600;
+
+                const hour = startTime.getHours(); // ใช้ getHours() เพราะ DB เป็นเวลาไทย
+                hourlyEnergy[hour] += avgPower * intervalHours;
+
+                startTime = intervalEnd;
+            }
+        }
 
         for (let i = 1; i < data.length; i++) {
-            const prev = data[i-1];
-            const curr = data[i];
-
-            const intervalHours = (curr.timestamp - prev.timestamp) / 1000 / 3600;
-            const avgPower = (curr.power + prev.power) / 2;
-            const energyKwh = avgPower * intervalHours;
-
-            const hourKey = prev.timestamp.getHours();
-            if (!hourlyEnergy[hourKey]) hourlyEnergy[hourKey] = 0;
-            hourlyEnergy[hourKey] += energyKwh;
+            addEnergy(data[i-1], data[i]);
         }
 
-        const hourlyArray = [];
-        for (let h = 0; h < 24; h++) {
-            hourlyArray.push({
-                hour: `${h.toString().padStart(2, '0')}:00`,
-                energy_kwh: Number((hourlyEnergy[h] || 0).toFixed(2)),
-                electricity_bill: calculateBill(hourlyEnergy[h] || 0)
-            });
+        // ถ้าเป็นวันนี้ ให้ตัดชั่วโมงที่ยังไม่ถึง
+        const now = new Date();
+        if (selectedDate === now.toISOString().slice(0,10)) {
+            for (let h = now.getHours()+1; h < 24; h++) {
+                hourlyEnergy[h] = 0;
+            }
         }
+
+        const hourlyArray = hourlyEnergy.map((energy, h) => ({
+            hour: `${h.toString().padStart(2,'0')}:00`,
+            energy_kwh: Number(energy.toFixed(2)),
+            electricity_bill: Number((energy*4.4).toFixed(2))
+        }));
 
         res.json({
             date: selectedDate,
@@ -314,6 +363,8 @@ app.get('/hourly-bill/:date', async (req, res) => {
         res.status(500).json({ error: 'Failed to get hourly bill', message: err.message });
     }
 });
+
+
 
 // ================= Minute Power Range with custom time range =================
 app.get('/minute-power-range', async (req, res) => {
@@ -466,8 +517,10 @@ app.get('/solar-size', async (req, res) => {
             });
         }
 
-        // ดึงข้อมูลจาก DB
-        const { start, end } = getDayRangeUTC(date); // ใช้ getDayRangeUTC เดิม
+        const start = new Date(`${date}T00:00:00`);
+        const end = new Date(`${date}T23:59:59`);
+        const now = new Date(); // เวลาปัจจุบัน
+
         const data = await PowerPXDH11.find({ timestamp: { $gte: start, $lte: end } })
                                       .sort({ timestamp: 1 })
                                       .select('timestamp power');
@@ -476,46 +529,70 @@ app.get('/solar-size', async (req, res) => {
             return res.status(404).json({ 
                 error: `No data found for ${date}`,
                 date,
+                hourly: Array.from({length:24}, (_,h)=>({
+                    hour: `${h.toString().padStart(2,'0')}:00`, 
+                    energy_kwh: 0, 
+                    electricity_bill: 0
+                })),
                 totalEnergyKwh: 0
             });
         }
 
-        // === รวม energy รายชั่วโมง โดยใช้เวลาไทยตรงๆ ===
-        const hourlyEnergy = {};
-        for (let i = 1; i < data.length; i++) {
-            const prev = data[i-1];
-            const curr = data[i];
+        const hourlyEnergy = Array.from({length:24}, () => 0);
 
-            const intervalHours = (curr.timestamp - prev.timestamp) / 1000 / 3600;
-            const avgPower = (curr.power + prev.power) / 2;
+        function addEnergy(prev, curr) {
+            let startTime = new Date(prev.timestamp);
+            const endTime = new Date(curr.timestamp);
+            const avgPower = (prev.power + curr.power) / 2;
 
-            // แปลง timestamp เป็นเวลาไทยตรงๆ
-            const prevTHHour = (prev.timestamp.getUTCHours() + 7) % 24;
+            while (startTime < endTime) {
+                const nextHour = new Date(startTime);
+                nextHour.setMinutes(60,0,0);
+                let intervalEnd = nextHour < endTime ? nextHour : endTime;
 
-            if (!hourlyEnergy[prevTHHour]) hourlyEnergy[prevTHHour] = 0;
-            hourlyEnergy[prevTHHour] += avgPower * intervalHours;
+                if (intervalEnd > now) intervalEnd = now;
+                if (intervalEnd <= startTime) break;
+
+                const intervalHours = (intervalEnd - startTime) / 1000 / 3600;
+                const hour = startTime.getHours();
+                hourlyEnergy[hour] += avgPower * intervalHours;
+
+                startTime = intervalEnd;
+            }
         }
 
-        // รวม energy เฉพาะชั่วโมง 06:00–18:00 (เวลาไทย)
-        const totalEnergyKwh = Object.keys(hourlyEnergy)
-            .filter(h => Number(h) >= 6 && Number(h) <= 18)
-            .reduce((sum, h) => sum + hourlyEnergy[h], 0);
+        for (let i = 1; i < data.length; i++) {
+            addEnergy(data[i-1], data[i]);
+        }
+
+        // สร้าง array รายชั่วโมง 0–23
+        const hourlyArray = hourlyEnergy.map((energy, h) => ({
+            hour: `${h.toString().padStart(2,'0')}:00`,
+            energy_kwh: Number(energy.toFixed(2)),
+            electricity_bill: Number((energy * ratePerKwh).toFixed(2))
+        }));
+
+        // รวม energy เฉพาะชั่วโมง 06:00–18:00
+        const totalEnergyKwh = hourlyArray
+            .filter(o => {
+                const h = Number(o.hour.split(':')[0]);
+                return h >= 6 && h <= 18;
+            })
+            .reduce((sum, o) => sum + o.energy_kwh, 0);
 
         const H_sun = 4; // peak sun hours
         const solarCapacity_kW = totalEnergyKwh / H_sun;
-
         const savingsDay = totalEnergyKwh * ratePerKwh;
-        const savingsMonth = savingsDay * 30;
-        const savingsYear = savingsDay * 365;
 
         res.json({
             date,
+            hourly: hourlyArray,
             totalEnergyKwh: Number(totalEnergyKwh.toFixed(2)),
             sunHours: H_sun,
             solarCapacity_kW: Number(solarCapacity_kW.toFixed(2)),
             savingsDay: Number(savingsDay.toFixed(2)),
-            savingsMonth: Number(savingsMonth.toFixed(2)),
-            savingsYear: Number(savingsYear.toFixed(2))
+            savingsMonth: Number((savingsDay*30).toFixed(2)),
+            savingsYear: Number((savingsDay*365).toFixed(2))
         });
 
     } catch (err) {
@@ -523,7 +600,6 @@ app.get('/solar-size', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
-
 
 // ================= Diagnostics Range Endpoint =================
 app.get('/diagnostics-range', async (req, res) => {
