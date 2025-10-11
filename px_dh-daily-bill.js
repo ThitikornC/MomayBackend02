@@ -691,240 +691,106 @@ app.get('/diagnostics-range', async (req, res) => {
     res.status(500).json({ error: "Failed", message: err.message });
   }
 });
-// ================= เพิ่ม Schema สำหรับ Push Notification =================
-const notificationSchema = new mongoose.Schema({
-    title: { type: String, required: true },
-    body: { type: String, required: true },
-    type: { 
-        type: String, 
-        enum: ['peak', 'threshold', 'daily_summary', 'alert', 'info'],
-        default: 'info'
-    },
-    data: { type: Object, default: {} }, // ข้อมูลเพิ่มเติม เช่น power, percentage
-    isRead: { type: Boolean, default: false },
-    createdAt: { type: Date, default: () => new Date(Date.now() + 7*60*60*1000) }
-}, { timestamps: true });
+// ================== PUSH NOTIFICATION SYSTEM ==================
+const webpush = require('web-push');
+const cron = require('node-cron');
 
-const Notification = mongoose.model("notifications", notificationSchema);
+webpush.setVapidDetails(
+  'mailto:admin@yourdomain.com',
+  'BB2fZ3NOzkWDKOi8H5jhbwICDTv760wIB6ZD2PwmXcUA_B5QXkXtely4b4JZ5v5b88VX1jKa7kRfr94nxqiksqY',
+  'jURJII6DrBN9N_8WtNayWs4bXWDNzeb_RyjXnTxaDmo'
+);
 
-// ================= Schema สำหรับ Push Subscription =================
-const subscriptionSchema = new mongoose.Schema({
-    endpoint: { type: String, required: true, unique: true },
-    keys: {
-        p256dh: String,
-        auth: String
-    },
-    userId: String, // เพิ่มในอนาคตถ้ามี user system
-    deviceInfo: String,
-    isActive: { type: Boolean, default: true },
-    lastNotificationAt: Date,
-    createdAt: { type: Date, default: () => new Date(Date.now() + 7*60*60*1000) }
-}, { timestamps: true });
+let pushSubscriptions = [];
 
-const PushSubscription = mongoose.model("push_subscriptions", subscriptionSchema);
+// สมัครรับการแจ้งเตือน
+app.post('/api/subscribe', (req, res) => {
+  const sub = req.body;
+  if (!sub || !sub.endpoint) {
+    return res.status(400).json({ error: 'Invalid subscription' });
+  }
 
-// ================= API: สมัครรับการแจ้งเตือน =================
-app.post('/api/subscribe', async (req, res) => {
-    try {
-        const sub = req.body;
-        if (!sub || !sub.endpoint) {
-            return res.status(400).json({ error: 'Invalid subscription' });
-        }
+  // ป้องกันซ้ำ
+  const exists = pushSubscriptions.find(s => s.endpoint === sub.endpoint);
+  if (!exists) pushSubscriptions.push(sub);
 
-        const existing = await PushSubscription.findOne({ endpoint: sub.endpoint });
-        if (existing) {
-            existing.keys = sub.keys;
-            existing.isActive = true;
-            existing.deviceInfo = req.headers['user-agent'] || '';
-            await existing.save();
-            return res.json({ message: 'Subscription updated', subscriptionId: existing._id });
-        }
-
-        const newSub = new PushSubscription({
-            endpoint: sub.endpoint,
-            keys: sub.keys,
-            deviceInfo: req.headers['user-agent'] || ''
-        });
-        await newSub.save();
-
-        console.log(`✅ New push subscription saved: ${newSub._id}`);
-        res.status(201).json({ message: 'Subscribed successfully', subscriptionId: newSub._id });
-
-    } catch (err) {
-        console.error('❌ Subscribe error:', err);
-        res.status(500).json({ error: 'Failed to subscribe', message: err.message });
-    }
+  console.log(`✅ Push subscription added (${pushSubscriptions.length} total)`);
+  res.status(201).json({ message: 'Subscribed successfully' });
 });
 
-// ================= API: ยกเลิกการแจ้งเตือน =================
-app.post('/api/unsubscribe', async (req, res) => {
-    try {
-        const { endpoint } = req.body;
-        if (!endpoint) return res.status(400).json({ error: 'Missing endpoint' });
-
-        const sub = await PushSubscription.findOne({ endpoint });
-        if (!sub) return res.status(404).json({ error: 'Subscription not found' });
-
-        sub.isActive = false;
-        await sub.save();
-        res.json({ message: 'Unsubscribed successfully' });
-
-    } catch (err) {
-        console.error('❌ Unsubscribe error:', err);
-        res.status(500).json({ error: 'Failed to unsubscribe', message: err.message });
-    }
+// ------------------ TEST PUSH (ต้องอยู่นอก /api/subscribe) ------------------
+app.get('/api/test-push', (req, res) => {
+  sendPushNotification('🔔 Test Push', 'การแจ้งเตือนทดสอบทำงานแล้ว!')
+    .then(() => res.send('✅ Push sent (if any subscriptions exist)'))
+    .catch(err => {
+      console.error('❌ test-push error:', err);
+      res.status(500).send('❌ Failed to send test push');
+    });
 });
 
-// ================= ฟังก์ชันส่ง Push Notification =================
-async function sendPushNotification(title, body, type = 'info', data = {}) {
+// ปรับปรุงฟังก์ชันส่งแจ้งเตือนให้จัดการ error และลบ subscription หมดอายุ
+async function sendPushNotification(title, body) {
+  const payload = JSON.stringify({ title, body, url: '/' });
+
+  if (!pushSubscriptions.length) {
+    console.log('⚠️ No push subscriptions to send to');
+    return;
+  }
+
+  for (let i = pushSubscriptions.length - 1; i >= 0; i--) {
+    const sub = pushSubscriptions[i];
     try {
-        // 1. บันทึกใน DB
-        const notification = new Notification({ title, body, type, data });
-        await notification.save();
-        console.log(`💾 Notification saved to DB: ${notification._id}`);
-
-        // 2. ดึง subscriptions ที่ active
-        const subscriptions = await PushSubscription.find({ isActive: true });
-        if (!subscriptions.length) {
-            console.log('⚠️ No active push subscriptions');
-            return;
-        }
-
-        const payload = JSON.stringify({ 
-            title, body, url: '/', notificationId: notification._id.toString(), type, data
-        });
-
-        // 3. ส่งแจ้งเตือนไปทุก endpoint
-        const results = await Promise.allSettled(
-            subscriptions.map(async (sub) => {
-                try {
-                    await webpush.sendNotification({
-                        endpoint: sub.endpoint,
-                        keys: sub.keys
-                    }, payload);
-
-                    sub.lastNotificationAt = new Date();
-                    await sub.save();
-                    console.log(`📤 Sent to ${sub.endpoint.substring(0, 50)}...`);
-                } catch (err) {
-                    console.error(`❌ Send failed: ${err.statusCode || err.message}`);
-                    if (err.statusCode === 410 || err.statusCode === 404) {
-                        sub.isActive = false;
-                        await sub.save();
-                        console.log(`🗑 Deactivated expired subscription`);
-                    }
-                }
-            })
-        );
-
-        const successCount = results.filter(r => r.status === 'fulfilled').length;
-        console.log(`✅ Sent ${successCount}/${subscriptions.length} notifications`);
-
+      await webpush.sendNotification(sub, payload);
+      console.log('📤 Sent notification to', sub.endpoint);
     } catch (err) {
-        console.error('❌ sendPushNotification error:', err);
+      console.error('❌ Push send error for', sub.endpoint, err.statusCode || err);
+      // ลบ subscription ถ้า expired (410) หรือ not found (404)
+      const status = err && err.statusCode;
+      if (status === 410 || status === 404) {
+        pushSubscriptions.splice(i, 1);
+        console.log('🗑 Removed expired subscription', sub.endpoint);
+      }
     }
+  }
 }
 
-// ================= API: ดึงรายการแจ้งเตือนทั้งหมด =================
-app.get('/api/notifications', async (req, res) => {
-    try {
-        const { limit = 50, skip = 0, type, isRead } = req.query;
-        const filter = {};
-        if (type) filter.type = type;
-        if (isRead !== undefined) filter.isRead = isRead === 'true';
 
-        const notifications = await Notification.find(filter)
-            .sort({ createdAt: -1 })
-            .limit(parseInt(limit))
-            .skip(parseInt(skip));
-
-        const total = await Notification.countDocuments(filter);
-        const unreadCount = await Notification.countDocuments({ isRead: false });
-
-        res.json({ notifications, total, unreadCount, limit: parseInt(limit), skip: parseInt(skip) });
-
-    } catch (err) {
-        console.error('❌ Get notifications error:', err);
-        res.status(500).json({ error: 'Failed to get notifications', message: err.message });
-    }
-});
-
-// ================= ฟังก์ชันตรวจจับค่า Peak =================
+// ================== REALTIME PEAK CHECK ==================
+// เก็บค่า peak สูงสุดของวันไว้ใน memory
 let dailyPeak = { date: '', maxPower: 0 };
-let halfThresholdAlertSent = false;
 
 async function checkDailyPeak() {
-    try {
-        const latest = await PowerPXDH11.findOne().sort({ timestamp: -1 }).select('power timestamp');
-        if (!latest) return;
+  try {
+    const latest = await PowerPXDH11.findOne().sort({ timestamp: -1 }).select('power timestamp');
+    if (!latest) return;
 
-        const today = new Date().toISOString().split('T')[0];
-        const powerNow = latest.power || 0;
+    const today = new Date().toISOString().split('T')[0];
 
-        // รีเซ็ตเมื่อเข้าสู่วันใหม่
-        if (dailyPeak.date !== today) {
-            dailyPeak = { date: today, maxPower: 0 };
-            halfThresholdAlertSent = false;
-            console.log(`🔁 Reset daily peak and 50% alert for ${today}`);
-        }
-
-        // ===== แจ้งเตือน Peak ใหม่ =====
-        if (powerNow > dailyPeak.maxPower) {
-            dailyPeak.maxPower = powerNow;
-            console.log(`🚨 New peak ${powerNow.toFixed(2)} kW at ${latest.timestamp}`);
-
-            await sendPushNotification(
-                '⚡ New Daily Peak!',
-                `Peak power today is ${powerNow.toFixed(2)} kW`,
-                'peak',
-                { 
-                    power: powerNow, 
-                    timestamp: latest.timestamp,
-                    percentage: (powerNow / total_maxKW * 100).toFixed(1)
-                }
-            );
-        }
-
-        // ===== แจ้งเตือนเมื่อเกิน 50% =====
-        if (powerNow >= halfMaxKW && !halfThresholdAlertSent) {
-            halfThresholdAlertSent = true;
-            const percentage = (powerNow / total_maxKW * 100).toFixed(1);
-            console.log(`⚠️ Power above 50%: ${powerNow.toFixed(2)} kW`);
-            
-            await sendPushNotification(
-                '⚡ Power Above 50%!',
-                `Current power is ${powerNow.toFixed(2)} kW (${percentage}%)`,
-                'threshold',
-                { 
-                    power: powerNow, 
-                    percentage: parseFloat(percentage),
-                    threshold: halfMaxKW,
-                    timestamp: latest.timestamp
-                }
-            );
-        }
-
-    } catch (err) {
-        console.error('❌ Error checking daily peak:', err);
+    // รีเซ็ตค่าเมื่อเข้าเช้าวันใหม่
+    if (dailyPeak.date !== today) {
+      dailyPeak = { date: today, maxPower: 0 };
+      console.log(`🔁 Reset daily peak for ${today}`);
     }
+
+    const powerNow = latest.power || 0;
+    if (powerNow > dailyPeak.maxPower) {
+      dailyPeak.maxPower = powerNow;
+         console.log(`🚨 New peak ${powerNow.toFixed(2)} kW at ${latest.timestamp}`);
+
+      // ส่ง Push notification
+      sendPushNotification(
+        '⚡ New Daily Peak!',
+        `Current peak power is ${powerNow.toFixed(2)} kW`
+      );
+    }
+  } catch (err) {
+    console.error('❌ Error checking daily peak:', err);
+  }
 }
 
-// ================= API: ดูรายการ Subscriptions ทั้งหมด =================
-app.get('/api/subscriptions', async (req, res) => {
-    try {
-        const subscriptions = await PushSubscription.find()
-            .select('-keys')
-            .sort({ createdAt: -1 });
-
-        const activeCount = await PushSubscription.countDocuments({ isActive: true });
-        const inactiveCount = await PushSubscription.countDocuments({ isActive: false });
-
-        res.json({ subscriptions, total: subscriptions.length, activeCount, inactiveCount });
-
-    } catch (err) {
-        console.error('❌ Get subscriptions error:', err);
-        res.status(500).json({ error: 'Failed to get subscriptions', message: err.message });
-    }
+// ตั้งเวลาตรวจสอบ peak ทุก 10 วินาที (ปรับได้ตามต้องการ)
+cron.schedule('*/10 * * * * *', () => {
+  checkDailyPeak();
 });
 
 // ================= Graceful Shutdown =================
