@@ -779,8 +779,8 @@ async function checkDailyPeak() {
 
       // ส่ง Push notification
       sendPushNotification(
-        '⚡ New Daily Peak!',
-        `Current peak power is ${powerNow.toFixed(2)} kW`
+        '⚡ New Daily KW Peak!',
+        ` peak power is ${powerNow.toFixed(2)} kW`
       );
     }
   } catch (err) {
