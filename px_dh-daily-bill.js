@@ -718,15 +718,6 @@ app.post('/api/subscribe', (req, res) => {
   res.status(201).json({ message: 'Subscribed successfully' });
 });
 
-// ------------------ TEST PUSH (ต้องอยู่นอก /api/subscribe) ------------------
-app.get('/api/test-push', (req, res) => {
-  sendPushNotification('🔔 Test Push', 'การแจ้งเตือนทดสอบทำงานแล้ว!')
-    .then(() => res.send('✅ Push sent (if any subscriptions exist)'))
-    .catch(err => {
-      console.error('❌ test-push error:', err);
-      res.status(500).send('❌ Failed to send test push');
-    });
-});
 
 // ปรับปรุงฟังก์ชันส่งแจ้งเตือนให้จัดการ error และลบ subscription หมดอายุ
 async function sendPushNotification(title, body) {
@@ -755,9 +746,18 @@ async function sendPushNotification(title, body) {
 }
 
 
-// ================== REALTIME PEAK CHECK ==================
+// ================== REALTIME PEAK + 50% THRESHOLD CHECK ==================
+const V = 400; 
+const root3 = Math.sqrt(3);
+const total_maxA = 100;
+const total_maxKW = root3 * V * total_maxA / 1000; // Max KW ของระบบ
+const halfMaxKW = total_maxKW * 0.5; // 50% ของ max KW
+
 // เก็บค่า peak สูงสุดของวันไว้ใน memory
 let dailyPeak = { date: '', maxPower: 0 };
+
+// เก็บสถานะแจ้งเตือน 50% เพื่อไม่ให้ส่งซ้ำ
+let halfThresholdAlertSent = false;
 
 async function checkDailyPeak() {
   try {
@@ -765,33 +765,46 @@ async function checkDailyPeak() {
     if (!latest) return;
 
     const today = new Date().toISOString().split('T')[0];
+    const powerNow = latest.power || 0;
 
-    // รีเซ็ตค่าเมื่อเข้าเช้าวันใหม่
+    // รีเซ็ตค่าเมื่อเช้าวันใหม่
     if (dailyPeak.date !== today) {
       dailyPeak = { date: today, maxPower: 0 };
-      console.log(`🔁 Reset daily peak for ${today}`);
+      halfThresholdAlertSent = false; // รีเซ็ต alert 50% ด้วย
+      console.log(`🔁 Reset daily peak and 50% alert for ${today}`);
     }
 
-    const powerNow = latest.power || 0;
+    // ===== Peak Alert =====
     if (powerNow > dailyPeak.maxPower) {
       dailyPeak.maxPower = powerNow;
-         console.log(`🚨 New peak ${powerNow.toFixed(2)} kW at ${latest.timestamp}`);
+      console.log(`🚨 New peak ${powerNow.toFixed(2)} kW at ${latest.timestamp}`);
 
-      // ส่ง Push notification
-      sendPushNotification(
-        '⚡ New Daily KW Peak!',
-        ` peak power is ${powerNow.toFixed(2)} kW`
+      await sendPushNotification(
+        '⚡ New Daily Peak!',
+        `Peak power today is ${powerNow.toFixed(2)} kW`
       );
     }
+
+    // ===== 50% Threshold Alert =====
+    if (powerNow >= halfMaxKW && !halfThresholdAlertSent) {
+      halfThresholdAlertSent = true;
+      console.log(`⚠️ Power above 50%: ${powerNow.toFixed(2)} kW`);
+      await sendPushNotification(
+        '⚡ Power Above 50%!',
+        `Current power is ${powerNow.toFixed(2)} kW (${(powerNow/total_maxKW*100).toFixed(1)}%)`
+      );
+    }
+
   } catch (err) {
     console.error('❌ Error checking daily peak:', err);
   }
 }
 
-// ตั้งเวลาตรวจสอบ peak ทุก 10 วินาที (ปรับได้ตามต้องการ)
+// ตั้งเวลาตรวจสอบทุก 10 วินาที
 cron.schedule('*/10 * * * * *', () => {
   checkDailyPeak();
 });
+
 
 // ================= Graceful Shutdown =================
 process.on('SIGTERM', async () => {
