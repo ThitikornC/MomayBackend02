@@ -473,7 +473,7 @@ app.use(session({
     saveUninitialized: false,
     store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI }),
     cookie: { maxAge: 24*60*60*1000 } // 1 วัน
-}));ss
+}));
 
 // ================= Daily Diff Popup =================
 app.get('/daily-diff-popup', async (req, res) => {
