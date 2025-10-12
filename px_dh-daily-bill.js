@@ -599,19 +599,22 @@ app.get('/solar-size', async (req, res) => {
         const solarCapacity_kW = dayEnergy / H_sun;
         const savingsDay = dayEnergy * ratePerKwh;
 
-        res.json({
-            date,
-            hourly: hourlyArray,
-            dayEnergy: Number(dayEnergy.toFixed(2)),       // 06:00–18:00
-            nightEnergy: Number(nightEnergy.toFixed(2)),   // 00:00–05:00 + 19:00–23:00
-            totalEnergyKwh: Number(totalEnergyKwh.toFixed(2)), // ทั้งวัน
-            sunHours: H_sun,
-            solarCapacity_kW: Number(solarCapacity_kW.toFixed(2)),
-            peakPowerDay: Number(peakPowerDay.toFixed(2)), // peak สูงสุดทั้งวัน
-            savingsDay: Number(savingsDay.toFixed(2)),
-            savingsMonth: Number((savingsDay*30).toFixed(2)),
-            savingsYear: Number((savingsDay*365).toFixed(2))
-        });
+     res.json({
+    date,
+    hourly: hourlyArray,
+    dayEnergy: Number(dayEnergy.toFixed(2)),       // 06:00–18:00
+    nightEnergy: Number(nightEnergy.toFixed(2)),   // 00:00–05:00 + 19:00–23:00
+    dayCost: Number((dayEnergy * ratePerKwh).toFixed(2)),   // เงินกลางวัน
+    nightCost: Number((nightEnergy * ratePerKwh).toFixed(2)), // เงินกลางคืน
+    totalEnergyKwh: Number(totalEnergyKwh.toFixed(2)), // ทั้งวัน
+    totalCost: Number((totalEnergyKwh * ratePerKwh).toFixed(2)), // เงินรวม
+    sunHours: H_sun,
+    solarCapacity_kW: Number(solarCapacity_kW.toFixed(2)),
+    peakPowerDay: Number(peakPowerDay.toFixed(2)), // peak สูงสุดทั้งวัน
+    savingsDay: Number(savingsDay.toFixed(2)),
+    savingsMonth: Number((savingsDay*30).toFixed(2)),
+    savingsYear: Number((savingsDay*365).toFixed(2))
+});
 
     } catch (err) {
         console.error(err);
