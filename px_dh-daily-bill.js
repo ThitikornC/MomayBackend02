@@ -473,7 +473,7 @@ app.use(session({
     saveUninitialized: false,
     store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI }),
     cookie: { maxAge: 24*60*60*1000 } // 1 วัน
-}));
+}));ss
 
 // ================= Daily Diff Popup =================
 app.get('/daily-diff-popup', async (req, res) => {
@@ -505,7 +505,8 @@ app.get('/daily-diff-popup', async (req, res) => {
 });
 
 
-// ================= Solar Size (UTC, no conversion, 06:00–18:00) =================
+
+// ================= Solar Size (UTC, เต็มเวอร์ชัน) =================
 app.get('/solar-size', async (req, res) => {
     try {
         const { date, ratePerKwh = 4.4 } = req.query;
@@ -520,7 +521,6 @@ app.get('/solar-size', async (req, res) => {
         const start = new Date(`${date}T00:00:00Z`);
         const end = new Date(`${date}T23:59:59Z`);
 
-        // ดึงข้อมูลทั้งวัน
         const data = await PowerPXDH11.find({
             timestamp: { $gte: start, $lte: end }
         }).sort({ timestamp: 1 }).select('timestamp power');
@@ -532,14 +532,24 @@ app.get('/solar-size', async (req, res) => {
                 hourly: Array.from({length:24}, (_,h) => ({
                     hour: `${h.toString().padStart(2,'0')}:00`,
                     energy_kwh: 0,
-                    electricity_bill: 0
+                    electricity_bill: 0,
+                    peak_power: 0
                 })),
-                totalEnergyKwh: 0
+                dayEnergy: 0,
+                nightEnergy: 0,
+                totalEnergyKwh: 0,
+                solarCapacity_kW: 0,
+                peakPowerDay: 0,
+                savingsDay: 0,
+                savingsMonth: 0,
+                savingsYear: 0
             });
         }
 
         const hourlyEnergy = Array.from({length:24}, () => 0);
+        const hourlyPeak = Array.from({length:24}, () => 0);
 
+        // คำนวณพลังงานต่อชั่วโมง + peak ต่อชั่วโมง
         for (let i = 1; i < data.length; i++) {
             const prev = data[i-1];
             const curr = data[i];
@@ -553,32 +563,51 @@ app.get('/solar-size', async (req, res) => {
                 nextHour.setUTCHours(nextHour.getUTCHours()+1,0,0,0);
                 const intervalEnd = nextHour < endTime ? nextHour : endTime;
                 const intervalHours = (intervalEnd - t) / 1000 / 3600;
+
                 hourlyEnergy[hourIndex] += avgPower * intervalHours;
+                hourlyPeak[hourIndex] = Math.max(hourlyPeak[hourIndex], prev.power, curr.power);
+
                 t = intervalEnd;
             }
         }
 
+        // สร้าง array สำหรับส่งผลลัพธ์
         const hourlyArray = hourlyEnergy.map((energy,h) => ({
             hour: `${h.toString().padStart(2,'0')}:00`,
             energy_kwh: Number(energy.toFixed(2)),
-            electricity_bill: Number((energy*ratePerKwh).toFixed(2))
+            electricity_bill: Number((energy*ratePerKwh).toFixed(2)),
+            peak_power: Number(hourlyPeak[h].toFixed(2))
         }));
 
-        // รวมพลังงานเฉพาะ 06:00–18:00
-        const totalEnergyKwh = hourlyArray
-            .slice(6, 19) // index 6–18 รวม 06:00–18:00
+        // แยกพลังงานกลางวัน 06:00–18:00
+        const dayEnergy = hourlyArray
+            .slice(6, 19)
             .reduce((sum,o) => sum + o.energy_kwh, 0);
 
-        const H_sun = 4; // ใช้ค่าคงที่
-        const solarCapacity_kW = totalEnergyKwh / H_sun;
-        const savingsDay = totalEnergyKwh * ratePerKwh;
+        // พลังงานช่วงกลางคืน 00:00–05:00 + 19:00–23:00
+        const nightEnergy = hourlyArray
+            .filter((_,h) => h < 6 || h > 18)
+            .reduce((sum,o) => sum + o.energy_kwh, 0);
+
+        // พลังงานรวมทั้งวัน (00:00–23:59)
+        const totalEnergyKwh = dayEnergy + nightEnergy;
+
+        // peak power ของทั้งวัน
+        const peakPowerDay = Math.max(...hourlyPeak);
+
+        const H_sun = 4; // ชั่วโมงแดดเทียบเท่า
+        const solarCapacity_kW = dayEnergy / H_sun;
+        const savingsDay = dayEnergy * ratePerKwh;
 
         res.json({
             date,
             hourly: hourlyArray,
-            totalEnergyKwh: Number(totalEnergyKwh.toFixed(2)),
+            dayEnergy: Number(dayEnergy.toFixed(2)),       // 06:00–18:00
+            nightEnergy: Number(nightEnergy.toFixed(2)),   // 00:00–05:00 + 19:00–23:00
+            totalEnergyKwh: Number(totalEnergyKwh.toFixed(2)), // ทั้งวัน
             sunHours: H_sun,
             solarCapacity_kW: Number(solarCapacity_kW.toFixed(2)),
+            peakPowerDay: Number(peakPowerDay.toFixed(2)), // peak สูงสุดทั้งวัน
             savingsDay: Number(savingsDay.toFixed(2)),
             savingsMonth: Number((savingsDay*30).toFixed(2)),
             savingsYear: Number((savingsDay*365).toFixed(2))
@@ -589,6 +618,7 @@ app.get('/solar-size', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 // ================= Route raw-local =================
 app.get('/raw-local', async (req, res) => {
