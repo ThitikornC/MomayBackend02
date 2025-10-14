@@ -43,6 +43,55 @@ const px_dh_schema = new mongoose.Schema({
 
 const PowerPXDH11 = mongoose.model("power_px_dh11", px_dh_schema);
 
+// ================= Notification Schemas (แยก collection) =================
+
+// 1. Peak Notifications
+const peakNotificationSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    body: { type: String, required: true },
+    power: { type: Number, required: true },
+    timestamp: { type: Date, default: () => new Date(Date.now() + 7*60*60*1000) },
+    read: { type: Boolean, default: false }
+}, { timestamps: true });
+
+const PeakNotification = mongoose.model("peak_notifications", peakNotificationSchema);
+
+// 2. Daily Diff Notifications
+const dailyDiffNotificationSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    body: { type: String, required: true },
+    yesterday: {
+        date: String,
+        energy_kwh: Number,
+        electricity_bill: Number,
+        samples: Number
+    },
+    dayBefore: {
+        date: String,
+        energy_kwh: Number,
+        electricity_bill: Number,
+        samples: Number
+    },
+    diff: {
+        kWh: Number,
+        electricity_bill: Number
+    },
+    timestamp: { type: Date, default: () => new Date(Date.now() + 7*60*60*1000) },
+    read: { type: Boolean, default: false }
+}, { timestamps: true });
+
+const DailyDiffNotification = mongoose.model("daily_diff_notifications", dailyDiffNotificationSchema);
+
+// 3. Test Notifications
+const testNotificationSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    body: { type: String, required: true },
+    timestamp: { type: Date, default: () => new Date(Date.now() + 7*60*60*1000) },
+    read: { type: Boolean, default: false }
+}, { timestamps: true });
+
+const TestNotification = mongoose.model("test_notifications", testNotificationSchema);
+
 // ================= Helper Functions =================
 function calculateBill(energyKwh, ratePerKwh = 4.4) {
     return Number((energyKwh * ratePerKwh).toFixed(2));
@@ -54,14 +103,11 @@ function getDayRangeUTC(dateStr) {
     return { start, end };
 }
 function getDayRangeUTCFromThailand(dateStr) {
-    // เวลาไทย
     const startTH = new Date(`${dateStr}T00:00:00`);
     const endTH = new Date(`${dateStr}T23:59:59`);
-    // แปลงเป็น UTC
     return { start: new Date(startTH.getTime() - 7*3600*1000),
              end: new Date(endTH.getTime() - 7*3600*1000) };
 }
-// แปลง YYYY-MM เป็น UTC month range
 function getMonthRange(yearMonth) {
     const start = new Date(`${yearMonth}-01T00:00:00Z`);
     const nextMonth = new Date(start);
@@ -76,7 +122,7 @@ app.get('/', (req, res) => {
     res.json({
         status: 'OK',
         service: 'px_dh Daily Bill API',
-        version: '1.0.6',
+        version: '1.1.0',
         timestamp: new Date().toISOString()
     });
 });
@@ -84,7 +130,7 @@ app.get('/', (req, res) => {
 // ================= Daily Bill =================
 app.get('/daily-bill', async (req, res) => {
     try {
-        const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
+        const today = new Date().toLocaleDateString('en-CA');
         const selectedDate = req.query.date || today;
 
         if (!/^\d{4}-\d{2}-\d{2}$/.test(selectedDate)) {
@@ -141,7 +187,6 @@ app.get('/daily-bill', async (req, res) => {
     }
 });
 
-// /daily-bill/:date
 app.get('/daily-bill/:date', async (req, res) => {
     req.query.date = req.params.date;
     return app._router.handle(req, res);
@@ -174,7 +219,6 @@ app.get('/calendar', async (req, res) => {
     const events = [];
 
     for (const item of agg) {
-      // หา dayData ทั้งวันมา integrate หา kWh
       const dayData = await PowerPXDH11.find({
         timestamp: {
           $gte: new Date(`${item._id}T00:00:00Z`),
@@ -265,7 +309,6 @@ app.get('/daily-diff', async (req, res) => {
     }
 });
 
-// ฟังก์ชันช่วยกระจาย energy ตามชั่วโมง
 function addEnergyToHours(prev, curr, hourlyEnergy) {
     let start = new Date(prev.timestamp);
     const end = new Date(curr.timestamp);
@@ -273,11 +316,11 @@ function addEnergyToHours(prev, curr, hourlyEnergy) {
 
     while (start < end) {
         const nextHour = new Date(start);
-        nextHour.setMinutes(60, 0, 0); // ชั่วโมงถัดไป
+        nextHour.setMinutes(60, 0, 0);
         const intervalEnd = nextHour < end ? nextHour : end;
         const intervalHours = (intervalEnd - start) / 1000 / 3600;
 
-        const hourKey = start.getHours(); // ใช้เวลาไทยตรง ๆ
+        const hourKey = start.getHours();
         if (!hourlyEnergy[hourKey]) hourlyEnergy[hourKey] = 0;
         hourlyEnergy[hourKey] += power * intervalHours;
 
@@ -293,7 +336,6 @@ app.get('/hourly-bill/:date', async (req, res) => {
             return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
         }
 
-        // query ตามวัน (เวลาไทยตรง ๆ)
         const start = new Date(`${selectedDate}T00:00:00`);
         const end = new Date(`${selectedDate}T23:59:59`);
 
@@ -301,11 +343,9 @@ app.get('/hourly-bill/:date', async (req, res) => {
                                       .sort({ timestamp: 1 })
                                       .select('power timestamp');
 
-        // เตรียม array ของ 24 ชั่วโมง
         const hourlyEnergy = Array.from({length:24}, ()=>0);
 
         if (data.length === 0) {
-            // ถ้าไม่มีข้อมูล ให้คืนค่า 0 ทั้งหมด
             return res.json({
                 date: selectedDate,
                 hourly: hourlyEnergy.map((e,h)=>({
@@ -316,19 +356,18 @@ app.get('/hourly-bill/:date', async (req, res) => {
             });
         }
 
-        // ฟังก์ชันกระจาย energy ตามชั่วโมงจริง
         function addEnergy(prev, curr) {
             let startTime = new Date(prev.timestamp);
             const endTime = new Date(curr.timestamp);
-            const avgPower = (prev.power + curr.power)/2; // kW
+            const avgPower = (prev.power + curr.power)/2;
 
             while (startTime < endTime) {
                 const nextHour = new Date(startTime);
-                nextHour.setMinutes(60,0,0); // จุดสิ้นสุดของชั่วโมงปัจจุบัน
+                nextHour.setMinutes(60,0,0);
                 const intervalEnd = nextHour < endTime ? nextHour : endTime;
                 const intervalHours = (intervalEnd - startTime)/1000/3600;
 
-                const hour = startTime.getHours(); // ใช้ getHours() เพราะ DB เป็นเวลาไทย
+                const hour = startTime.getHours();
                 hourlyEnergy[hour] += avgPower * intervalHours;
 
                 startTime = intervalEnd;
@@ -339,7 +378,6 @@ app.get('/hourly-bill/:date', async (req, res) => {
             addEnergy(data[i-1], data[i]);
         }
 
-        // ถ้าเป็นวันนี้ ให้ตัดชั่วโมงที่ยังไม่ถึง
         const now = new Date();
         if (selectedDate === now.toISOString().slice(0,10)) {
             for (let h = now.getHours()+1; h < 24; h++) {
@@ -364,12 +402,10 @@ app.get('/hourly-bill/:date', async (req, res) => {
     }
 });
 
-
-
-// ================= Minute Power Range with custom time range =================
+// ================= Minute Power Range =================
 app.get('/minute-power-range', async (req, res) => {
     try {
-        const { date, startHour, endHour } = req.query; // date = YYYY-MM-DD, startHour, endHour = 0-23
+        const { date, startHour, endHour } = req.query;
 
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
             return res.status(400).json({
@@ -378,10 +414,8 @@ app.get('/minute-power-range', async (req, res) => {
             });
         }
 
-        // เริ่มต้นวัน UTC
         let { start, end } = getDayRangeUTC(date);
 
-        // ปรับช่วงเวลา ถ้ามี startHour / endHour
         if (startHour !== undefined) start.setUTCHours(Number(startHour), 0, 0, 0);
         if (endHour !== undefined) end.setUTCHours(Number(endHour), 59, 59, 999);
 
@@ -408,10 +442,10 @@ app.get('/minute-power-range', async (req, res) => {
     }
 });
 
-// ================= Hourly kWh & Bill =================
+// ================= Hourly Summary =================
 app.get('/hourly-summary', async (req, res) => {
     try {
-        const { date } = req.query; // date = YYYY-MM-DD
+        const { date } = req.query;
 
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
             return res.status(400).json({
@@ -420,15 +454,12 @@ app.get('/hourly-summary', async (req, res) => {
             });
         }
 
-        // ช่วงวัน UTC
         const { start, end } = getDayRangeUTC(date);
 
-        // ดึงข้อมูล
         const data = await PowerPXDH11.find({
             timestamp: { $gte: start, $lte: end }
         }).sort({ timestamp: 1 }).select('timestamp power');
 
-        // เตรียม array 24 ชั่วโมง
         const hourly = Array.from({ length: 24 }, (_, i) => ({
             hour: `${i.toString().padStart(2,'0')}:00`,
             energy_kwh: 0,
@@ -439,7 +470,7 @@ app.get('/hourly-summary', async (req, res) => {
             const prev = data[i-1];
             const curr = data[i];
 
-            const intervalHours = (curr.timestamp - prev.timestamp) / 1000 / 3600; // ชั่วโมง
+            const intervalHours = (curr.timestamp - prev.timestamp) / 1000 / 3600;
             const avgPower = (curr.power + prev.power) / 2;
             const energyKwh = avgPower * intervalHours;
 
@@ -447,10 +478,9 @@ app.get('/hourly-summary', async (req, res) => {
             hourly[hourKey].energy_kwh += energyKwh;
         }
 
-        // ปัดค่าและคำนวณค่าไฟ
         hourly.forEach(h => {
             h.energy_kwh = Number(h.energy_kwh.toFixed(2));
-            h.electricity_bill = Number((h.energy_kwh * 4.4).toFixed(2)); // rate 4.4
+            h.electricity_bill = Number((h.energy_kwh * 4.4).toFixed(2));
         });
 
         res.json({
@@ -463,6 +493,7 @@ app.get('/hourly-summary', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 // ================= Session =================
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
@@ -472,7 +503,7 @@ app.use(session({
     resave: false,
     saveUninitialized: false,
     store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI }),
-    cookie: { maxAge: 24*60*60*1000 } // 1 วัน
+    cookie: { maxAge: 24*60*60*1000 }
 }));
 
 // ================= Daily Diff Popup =================
@@ -480,13 +511,10 @@ app.get('/daily-diff-popup', async (req, res) => {
     try {
         const todayStr = new Date().toISOString().split('T')[0];
 
-        // ถ้ายังไม่เคยโชว์วันนี้
         if (!req.session.lastPopupDate || req.session.lastPopupDate !== todayStr) {
-            // เรียก daily-diff เดิม
             const axios = require('axios');
             const diffResp = await axios.get(`http://localhost:${PORT}/daily-diff`);
 
-            // บันทึกวันที่ล่าสุดใน session
             req.session.lastPopupDate = todayStr;
 
             return res.json({
@@ -495,7 +523,6 @@ app.get('/daily-diff-popup', async (req, res) => {
             });
         }
 
-        // เคยโชว์แล้ววันนี้
         res.json({ showPopup: false });
 
     } catch (err) {
@@ -504,9 +531,7 @@ app.get('/daily-diff-popup', async (req, res) => {
     }
 });
 
-
-
-// ================= Solar Size (UTC, เต็มเวอร์ชัน) =================
+// ================= Solar Size =================
 app.get('/solar-size', async (req, res) => {
     try {
         const { date, ratePerKwh = 4.4 } = req.query;
@@ -514,7 +539,7 @@ app.get('/solar-size', async (req, res) => {
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
             return res.status(400).json({ 
                 error: "Missing or invalid date. Use YYYY-MM-DD",
-                example: "/solar-size-utc?date=2025-10-07"
+                example: "/solar-size?date=2025-10-07"
             });
         }
 
@@ -549,7 +574,6 @@ app.get('/solar-size', async (req, res) => {
         const hourlyEnergy = Array.from({length:24}, () => 0);
         const hourlyPeak = Array.from({length:24}, () => 0);
 
-        // คำนวณพลังงานต่อชั่วโมง + peak ต่อชั่วโมง
         for (let i = 1; i < data.length; i++) {
             const prev = data[i-1];
             const curr = data[i];
@@ -571,7 +595,6 @@ app.get('/solar-size', async (req, res) => {
             }
         }
 
-        // สร้าง array สำหรับส่งผลลัพธ์
         const hourlyArray = hourlyEnergy.map((energy,h) => ({
             hour: `${h.toString().padStart(2,'0')}:00`,
             energy_kwh: Number(energy.toFixed(2)),
@@ -579,42 +602,37 @@ app.get('/solar-size', async (req, res) => {
             peak_power: Number(hourlyPeak[h].toFixed(2))
         }));
 
-        // แยกพลังงานกลางวัน 06:00–18:00
         const dayEnergy = hourlyArray
             .slice(6, 19)
             .reduce((sum,o) => sum + o.energy_kwh, 0);
 
-        // พลังงานช่วงกลางคืน 00:00–05:00 + 19:00–23:00
         const nightEnergy = hourlyArray
             .filter((_,h) => h < 6 || h > 18)
             .reduce((sum,o) => sum + o.energy_kwh, 0);
 
-        // พลังงานรวมทั้งวัน (00:00–23:59)
         const totalEnergyKwh = dayEnergy + nightEnergy;
-
-        // peak power ของทั้งวัน
         const peakPowerDay = Math.max(...hourlyPeak);
 
-        const H_sun = 4; // ชั่วโมงแดดเทียบเท่า
+        const H_sun = 4;
         const solarCapacity_kW = dayEnergy / H_sun;
         const savingsDay = dayEnergy * ratePerKwh;
 
-     res.json({
-    date,
-    hourly: hourlyArray,
-    dayEnergy: Number(dayEnergy.toFixed(2)),       // 06:00–18:00
-    nightEnergy: Number(nightEnergy.toFixed(2)),   // 00:00–05:00 + 19:00–23:00
-    dayCost: Number((dayEnergy * ratePerKwh).toFixed(2)),   // เงินกลางวัน
-    nightCost: Number((nightEnergy * ratePerKwh).toFixed(2)), // เงินกลางคืน
-    totalEnergyKwh: Number(totalEnergyKwh.toFixed(2)), // ทั้งวัน
-    totalCost: Number((totalEnergyKwh * ratePerKwh).toFixed(2)), // เงินรวม
-    sunHours: H_sun,
-    solarCapacity_kW: Number(solarCapacity_kW.toFixed(2)),
-    peakPowerDay: Number(peakPowerDay.toFixed(2)), // peak สูงสุดทั้งวัน
-    savingsDay: Number(savingsDay.toFixed(2)),
-    savingsMonth: Number((savingsDay*30).toFixed(2)),
-    savingsYear: Number((savingsDay*365).toFixed(2))
-});
+        res.json({
+            date,
+            hourly: hourlyArray,
+            dayEnergy: Number(dayEnergy.toFixed(2)),
+            nightEnergy: Number(nightEnergy.toFixed(2)),
+            dayCost: Number((dayEnergy * ratePerKwh).toFixed(2)),
+            nightCost: Number((nightEnergy * ratePerKwh).toFixed(2)),
+            totalEnergyKwh: Number(totalEnergyKwh.toFixed(2)),
+            totalCost: Number((totalEnergyKwh * ratePerKwh).toFixed(2)),
+            sunHours: H_sun,
+            solarCapacity_kW: Number(solarCapacity_kW.toFixed(2)),
+            peakPowerDay: Number(peakPowerDay.toFixed(2)),
+            savingsDay: Number(savingsDay.toFixed(2)),
+            savingsMonth: Number((savingsDay*30).toFixed(2)),
+            savingsYear: Number((savingsDay*365).toFixed(2))
+        });
 
     } catch (err) {
         console.error(err);
@@ -622,14 +640,12 @@ app.get('/solar-size', async (req, res) => {
     }
 });
 
-
-// ================= Route raw-local =================
+// ================= Raw Local =================
 app.get('/raw-local', async (req, res) => {
   try {
-    const { date } = req.query; // เช่น "2025-10-07"
+    const { date } = req.query;
     if (!date) return res.status(400).json({ error: 'Missing date' });
 
-    // เวลา 08:00-09:00 local/DB (UTC+7)
     const start = new Date(`${date}T08:00:00+07:00`);
     const end   = new Date(`${date}T09:00:00+07:00`);
 
@@ -660,7 +676,6 @@ app.get('/raw-08-09', async (req, res) => {
       return res.status(400).json({ error: "Invalid date. Use YYYY-MM-DD" });
     }
 
-    // เวลา UTC 08:00-09:00 ตาม DB
     const start = new Date(`${date}T08:00:00.000Z`);
     const end = new Date(`${date}T08:59:59.999Z`);
 
@@ -675,7 +690,7 @@ app.get('/raw-08-09', async (req, res) => {
       period: "08:00-09:00 UTC",
       count: data.length,
       totalPower: Number(totalPower.toFixed(3)),
-      data // timestamp จะตรงกับ DB จริง ๆ เลย
+      data
     });
   } catch (err) {
     console.error(err);
@@ -683,8 +698,7 @@ app.get('/raw-08-09', async (req, res) => {
   }
 });
 
-
-// ================= Diagnostics Range Endpoint =================
+// ================= Diagnostics Range =================
 app.get('/diagnostics-range', async (req, res) => {
   try {
     const { start, end } = req.query;
@@ -705,7 +719,6 @@ app.get('/diagnostics-range', async (req, res) => {
     .sort({ timestamp: 1 })
     .select('timestamp power voltage current active_power_phase_a active_power_phase_b active_power_phase_c');
 
-    // ตัด Z ออก
     const result = data.map(d => ({
       _id: d._id,
       voltage: d.voltage,
@@ -714,7 +727,7 @@ app.get('/diagnostics-range', async (req, res) => {
       active_power_phase_a: d.active_power_phase_a,
       active_power_phase_b: d.active_power_phase_b,
       active_power_phase_c: d.active_power_phase_c,
-      timestamp: d.timestamp.toISOString().replace('Z','') // ตัด Z
+      timestamp: d.timestamp.toISOString().replace('Z','')
     }));
 
     res.json(result);
@@ -724,6 +737,7 @@ app.get('/diagnostics-range', async (req, res) => {
     res.status(500).json({ error: "Failed", message: err.message });
   }
 });
+
 // ================== PUSH NOTIFICATION SYSTEM ==================
 const webpush = require('web-push');
 const cron = require('node-cron');
@@ -743,7 +757,6 @@ app.post('/api/subscribe', (req, res) => {
     return res.status(400).json({ error: 'Invalid subscription' });
   }
 
-  // ป้องกันซ้ำ
   const exists = pushSubscriptions.find(s => s.endpoint === sub.endpoint);
   if (!exists) pushSubscriptions.push(sub);
 
@@ -751,45 +764,77 @@ app.post('/api/subscribe', (req, res) => {
   res.status(201).json({ message: 'Subscribed successfully' });
 });
 
-// ------------------ TEST PUSH (ต้องอยู่นอก /api/subscribe) ------------------
-app.get('/api/test-push', (req, res) => {
-  sendPushNotification('🔔 Test Push', 'การแจ้งเตือนทดสอบทำงานแล้ว!')
-    .then(() => res.send('✅ Push sent (if any subscriptions exist)'))
-    .catch(err => {
-      console.error('❌ test-push error:', err);
-      res.status(500).send('❌ Failed to send test push');
-    });
-});
+// ฟังก์ชันส่ง Push Notification พร้อมบันทึกลง DB แยก collection
+async function sendPushNotification(title, body, type = 'test', data = {}) {
+  try {
+    let notification;
 
-// ปรับปรุงฟังก์ชันส่งแจ้งเตือนให้จัดการ error และลบ subscription หมดอายุ
-async function sendPushNotification(title, body) {
-  const payload = JSON.stringify({ title, body, url: '/' });
+    // 1. บันทึกลง Database แยกตาม type
+    switch(type) {
+      case 'peak':
+        notification = await PeakNotification.create({
+          title,
+          body,
+          power: data.power
+        });
+        console.log('💾 Peak Notification saved:', notification._id);
+        break;
 
-  if (!pushSubscriptions.length) {
-    console.log('⚠️ No push subscriptions to send to');
-    return;
-  }
+      case 'daily_diff':
+        notification = await DailyDiffNotification.create({
+          title,
+          body,
+          yesterday: data.yesterday,
+          dayBefore: data.dayBefore,
+          diff: data.diff
+        });
+        console.log('💾 Daily Diff Notification saved:', notification._id);
+        break;
 
-  for (let i = pushSubscriptions.length - 1; i >= 0; i--) {
-    const sub = pushSubscriptions[i];
-    try {
-      await webpush.sendNotification(sub, payload);
-      console.log('📤 Sent notification to', sub.endpoint);
-    } catch (err) {
-      console.error('❌ Push send error for', sub.endpoint, err.statusCode || err);
-      // ลบ subscription ถ้า expired (410) หรือ not found (404)
-      const status = err && err.statusCode;
-      if (status === 410 || status === 404) {
-        pushSubscriptions.splice(i, 1);
-        console.log('🗑 Removed expired subscription', sub.endpoint);
+      case 'test':
+        notification = await TestNotification.create({
+          title,
+          body
+        });
+        console.log('💾 Test Notification saved:', notification._id);
+        break;
+
+      default:
+        console.error('❌ Unknown notification type:', type);
+        return null;
+    }
+
+    // 2. ส่ง Push notification
+    const payload = JSON.stringify({ title, body, url: '/' });
+
+    if (!pushSubscriptions.length) {
+      console.log('⚠️ No push subscriptions to send to');
+      return notification;
+    }
+
+    for (let i = pushSubscriptions.length - 1; i >= 0; i--) {
+      const sub = pushSubscriptions[i];
+      try {
+        await webpush.sendNotification(sub, payload);
+        console.log('📤 Sent notification to', sub.endpoint);
+      } catch (err) {
+        console.error('❌ Push send error for', sub.endpoint, err.statusCode || err);
+        const status = err && err.statusCode;
+        if (status === 410 || status === 404) {
+          pushSubscriptions.splice(i, 1);
+          console.log('🗑 Removed expired subscription', sub.endpoint);
+        }
       }
     }
+
+    return notification;
+  } catch (err) {
+    console.error('❌ Error in sendPushNotification:', err);
+    throw err;
   }
 }
 
-
 // ================== REALTIME PEAK CHECK ==================
-// เก็บค่า peak สูงสุดของวันไว้ใน memory
 let dailyPeak = { date: '', maxPower: 0 };
 
 async function checkDailyPeak() {
@@ -799,7 +844,6 @@ async function checkDailyPeak() {
 
     const today = new Date().toISOString().split('T')[0];
 
-    // รีเซ็ตค่าเมื่อเข้าเช้าวันใหม่
     if (dailyPeak.date !== today) {
       dailyPeak = { date: today, maxPower: 0 };
       console.log(`🔁 Reset daily peak for ${today}`);
@@ -808,12 +852,13 @@ async function checkDailyPeak() {
     const powerNow = latest.power || 0;
     if (powerNow > dailyPeak.maxPower) {
       dailyPeak.maxPower = powerNow;
-         console.log(`🚨 New peak ${powerNow.toFixed(2)} kW at ${latest.timestamp}`);
+      console.log(`🚨 New peak ${powerNow.toFixed(2)} kW at ${latest.timestamp}`);
 
-      // ส่ง Push notification
-      sendPushNotification(
+      await sendPushNotification(
         '⚡ New Daily Peak!',
-        `Current peak power is ${powerNow.toFixed(2)} kW`
+        `Current peak power is ${powerNow.toFixed(2)} kW`,
+        'peak',
+        { power: powerNow }
       );
     }
   } catch (err) {
@@ -821,9 +866,455 @@ async function checkDailyPeak() {
   }
 }
 
-// ตั้งเวลาตรวจสอบ peak ทุก 10 วินาที (ปรับได้ตามต้องการ)
+// ตรวจสอบ peak ทุก 10 วินาที
 cron.schedule('*/10 * * * * *', () => {
   checkDailyPeak();
+});
+
+// ================== TEST PUSH ==================
+app.get('/api/test-push', async (req, res) => {
+  try {
+    await sendPushNotification(
+      '🔔 Test Push',
+      'การแจ้งเตือนทดสอบทำงานแล้ว!',
+      'test',
+      {}
+    );
+    res.send('✅ Push sent and saved to DB');
+  } catch (err) {
+    console.error('❌ test-push error:', err);
+    res.status(500).send('❌ Failed to send test push');
+  }
+});
+
+// ================== NOTIFICATION API ==================
+
+// 1. ดึง Peak Notifications
+app.get('/api/notifications/peak', async (req, res) => {
+  try {
+    const { limit = 50, page = 1, unreadOnly = false } = req.query;
+    const query = unreadOnly === 'true' ? { read: false } : {};
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const notifications = await PeakNotification.find(query)
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .skip(skip);
+
+    const total = await PeakNotification.countDocuments(query);
+    const unreadCount = await PeakNotification.countDocuments({ read: false });
+
+    res.json({
+      success: true,
+      type: 'peak',
+      data: notifications,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(total / parseInt(limit))
+      },
+      unreadCount
+    });
+  } catch (err) {
+    console.error('❌ GET /api/notifications/peak error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. ดึง Daily Diff Notifications
+app.get('/api/notifications/daily-diff', async (req, res) => {
+  try {
+    const { limit = 50, page = 1, unreadOnly = false } = req.query;
+    const query = unreadOnly === 'true' ? { read: false } : {};
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const notifications = await DailyDiffNotification.find(query)
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .skip(skip);
+
+    const total = await DailyDiffNotification.countDocuments(query);
+    const unreadCount = await DailyDiffNotification.countDocuments({ read: false });
+
+    res.json({
+      success: true,
+      type: 'daily_diff',
+      data: notifications,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(total / parseInt(limit))
+      },
+      unreadCount
+    });
+  } catch (err) {
+    console.error('❌ GET /api/notifications/daily-diff error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. ดึง Test Notifications
+app.get('/api/notifications/test', async (req, res) => {
+  try {
+    const { limit = 50, page = 1, unreadOnly = false } = req.query;
+    const query = unreadOnly === 'true' ? { read: false } : {};
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const notifications = await TestNotification.find(query)
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .skip(skip);
+
+    const total = await TestNotification.countDocuments(query);
+    const unreadCount = await TestNotification.countDocuments({ read: false });
+
+    res.json({
+      success: true,
+      type: 'test',
+      data: notifications,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(total / parseInt(limit))
+      },
+      unreadCount
+    });
+  } catch (err) {
+    console.error('❌ GET /api/notifications/test error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. ดึงทั้งหมด (รวม 3 collections)
+app.get('/api/notifications/all', async (req, res) => {
+  try {
+    const { limit = 50, page = 1, unreadOnly = false } = req.query;
+    const query = unreadOnly === 'true' ? { read: false } : {};
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const peakNoti = await PeakNotification.find(query)
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .skip(skip)
+      .lean();
+    
+    const dailyDiffNoti = await DailyDiffNotification.find(query)
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .skip(skip)
+      .lean();
+    
+    const testNoti = await TestNotification.find(query)
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .skip(skip)
+      .lean();
+
+    const allNotifications = [
+      ...peakNoti.map(n => ({...n, type: 'peak'})),
+      ...dailyDiffNoti.map(n => ({...n, type: 'daily_diff'})),
+      ...testNoti.map(n => ({...n, type: 'test'}))
+    ].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+     .slice(0, parseInt(limit));
+
+    const totalPeak = await PeakNotification.countDocuments(query);
+    const totalDaily = await DailyDiffNotification.countDocuments(query);
+    const totalTest = await TestNotification.countDocuments(query);
+    const total = totalPeak + totalDaily + totalTest;
+
+    const unreadPeak = await PeakNotification.countDocuments({ read: false });
+    const unreadDaily = await DailyDiffNotification.countDocuments({ read: false });
+    const unreadTest = await TestNotification.countDocuments({ read: false });
+    const unreadCount = unreadPeak + unreadDaily + unreadTest;
+
+    res.json({
+      success: true,
+      data: allNotifications,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(total / parseInt(limit))
+      },
+      unreadCount,
+      breakdown: {
+        peak: { total: totalPeak, unread: unreadPeak },
+        daily_diff: { total: totalDaily, unread: unreadDaily },
+        test: { total: totalTest, unread: unreadTest }
+      }
+    });
+  } catch (err) {
+    console.error('❌ GET /api/notifications/all error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5. ดึงล่าสุด (รวมทุก type)
+app.get('/api/notifications/recent', async (req, res) => {
+  try {
+    const { limit = 10 } = req.query;
+    
+    const peakNoti = await PeakNotification.find()
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .lean();
+    
+    const dailyDiffNoti = await DailyDiffNotification.find()
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .lean();
+    
+    const testNoti = await TestNotification.find()
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .lean();
+
+    const allNotifications = [
+      ...peakNoti.map(n => ({...n, type: 'peak'})),
+      ...dailyDiffNoti.map(n => ({...n, type: 'daily_diff'})),
+      ...testNoti.map(n => ({...n, type: 'test'}))
+    ].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+     .slice(0, parseInt(limit));
+
+    const unreadPeak = await PeakNotification.countDocuments({ read: false });
+    const unreadDaily = await DailyDiffNotification.countDocuments({ read: false });
+    const unreadTest = await TestNotification.countDocuments({ read: false });
+    const unreadCount = unreadPeak + unreadDaily + unreadTest;
+
+    res.json({
+      success: true,
+      data: allNotifications,
+      unreadCount,
+      breakdown: {
+        peak: unreadPeak,
+        daily_diff: unreadDaily,
+        test: unreadTest
+      }
+    });
+  } catch (err) {
+    console.error('❌ GET /api/notifications/recent error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 6. ทำเครื่องหมายว่าอ่านแล้ว
+app.patch('/api/notifications/mark-read', async (req, res) => {
+  try {
+    const { type, ids } = req.body;
+
+    if (!type || !ids || !Array.isArray(ids)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'type and ids array are required',
+        example: { type: 'peak', ids: ['id1', 'id2'] }
+      });
+    }
+
+    let result;
+    switch(type) {
+      case 'peak':
+        result = await PeakNotification.updateMany(
+          { _id: { $in: ids } },
+          { $set: { read: true } }
+        );
+        break;
+      case 'daily_diff':
+        result = await DailyDiffNotification.updateMany(
+          { _id: { $in: ids } },
+          { $set: { read: true } }
+        );
+        break;
+      case 'test':
+        result = await TestNotification.updateMany(
+          { _id: { $in: ids } },
+          { $set: { read: true } }
+        );
+        break;
+      default:
+        return res.status(400).json({ success: false, error: 'Invalid type' });
+    }
+
+    res.json({
+      success: true,
+      message: `Marked ${result.modifiedCount} ${type} notifications as read`,
+      modifiedCount: result.modifiedCount
+    });
+  } catch (err) {
+    console.error('❌ PATCH /api/notifications/mark-read error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 7. ทำเครื่องหมายทั้งหมดว่าอ่านแล้ว
+app.patch('/api/notifications/mark-all-read', async (req, res) => {
+  try {
+    const resultPeak = await PeakNotification.updateMany(
+      { read: false },
+      { $set: { read: true } }
+    );
+    
+    const resultDaily = await DailyDiffNotification.updateMany(
+      { read: false },
+      { $set: { read: true } }
+    );
+    
+    const resultTest = await TestNotification.updateMany(
+      { read: false },
+      { $set: { read: true } }
+    );
+
+    const totalModified = resultPeak.modifiedCount + resultDaily.modifiedCount + resultTest.modifiedCount;
+
+    res.json({
+      success: true,
+      message: `Marked ${totalModified} notifications as read`,
+      breakdown: {
+        peak: resultPeak.modifiedCount,
+        daily_diff: resultDaily.modifiedCount,
+        test: resultTest.modifiedCount
+      },
+      totalModified
+    });
+  } catch (err) {
+    console.error('❌ PATCH /api/notifications/mark-all-read error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 8. ลบ notification
+app.delete('/api/notifications/:type/:id', async (req, res) => {
+  try {
+    const { type, id } = req.params;
+
+    let result;
+    switch(type) {
+      case 'peak':
+        result = await PeakNotification.findByIdAndDelete(id);
+        break;
+      case 'daily_diff':
+        result = await DailyDiffNotification.findByIdAndDelete(id);
+        break;
+      case 'test':
+        result = await TestNotification.findByIdAndDelete(id);
+        break;
+      default:
+        return res.status(400).json({ success: false, error: 'Invalid type' });
+    }
+
+    if (!result) {
+      return res.status(404).json({ success: false, error: 'Notification not found' });
+    }
+
+    res.json({
+      success: true,
+      message: `${type} notification deleted successfully`
+    });
+  } catch (err) {
+    console.error('❌ DELETE /api/notifications error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 9. ลบทั้งหมด (ตาม type หรือทุก type)
+app.delete('/api/notifications', async (req, res) => {
+  try {
+    const { type } = req.query;
+
+    let resultPeak, resultDaily, resultTest;
+
+    if (!type || type === 'all') {
+      resultPeak = await PeakNotification.deleteMany({});
+      resultDaily = await DailyDiffNotification.deleteMany({});
+      resultTest = await TestNotification.deleteMany({});
+    } else {
+      switch(type) {
+        case 'peak':
+          resultPeak = await PeakNotification.deleteMany({});
+          break;
+        case 'daily_diff':
+          resultDaily = await DailyDiffNotification.deleteMany({});
+          break;
+        case 'test':
+          resultTest = await TestNotification.deleteMany({});
+          break;
+        default:
+          return res.status(400).json({ success: false, error: 'Invalid type' });
+      }
+    }
+
+    const totalDeleted = (resultPeak?.deletedCount || 0) + 
+                        (resultDaily?.deletedCount || 0) + 
+                        (resultTest?.deletedCount || 0);
+
+    res.json({
+      success: true,
+      message: `Deleted ${totalDeleted} notifications`,
+      breakdown: {
+        peak: resultPeak?.deletedCount || 0,
+        daily_diff: resultDaily?.deletedCount || 0,
+        test: resultTest?.deletedCount || 0
+      },
+      totalDeleted
+    });
+  } catch (err) {
+    console.error('❌ DELETE /api/notifications error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 10. สถิติ notification (แยกตาม type)
+app.get('/api/notifications/stats', async (req, res) => {
+  try {
+    const totalPeak = await PeakNotification.countDocuments();
+    const unreadPeak = await PeakNotification.countDocuments({ read: false });
+    const latestPeak = await PeakNotification.findOne().sort({ timestamp: -1 });
+
+    const totalDaily = await DailyDiffNotification.countDocuments();
+    const unreadDaily = await DailyDiffNotification.countDocuments({ read: false });
+    const latestDaily = await DailyDiffNotification.findOne().sort({ timestamp: -1 });
+
+    const totalTest = await TestNotification.countDocuments();
+    const unreadTest = await TestNotification.countDocuments({ read: false });
+    const latestTest = await TestNotification.findOne().sort({ timestamp: -1 });
+
+    const total = totalPeak + totalDaily + totalTest;
+    const unread = unreadPeak + unreadDaily + unreadTest;
+
+    res.json({
+      success: true,
+      stats: {
+        total,
+        unread,
+        read: total - unread,
+        byType: {
+          peak: {
+            total: totalPeak,
+            unread: unreadPeak,
+            read: totalPeak - unreadPeak,
+            latest: latestPeak
+          },
+          daily_diff: {
+            total: totalDaily,
+            unread: unreadDaily,
+            read: totalDaily - unreadDaily,
+            latest: latestDaily
+          },
+          test: {
+            total: totalTest,
+            unread: unreadTest,
+            read: totalTest - unreadTest,
+            latest: latestTest
+          }
+        }
+      }
+    });
+  } catch (err) {
+    console.error('❌ GET /api/notifications/stats error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ================= Graceful Shutdown =================
