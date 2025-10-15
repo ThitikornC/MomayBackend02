@@ -92,6 +92,20 @@ const testNotificationSchema = new mongoose.Schema({
 
 const TestNotification = mongoose.model("test_notifications", testNotificationSchema);
 
+const dailyBillNotificationSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    body: { type: String, required: true },
+    date: { type: String, required: true }, // YYYY-MM-DD
+    energy_kwh: { type: Number, required: true },
+    electricity_bill: { type: Number, required: true },
+    samples: { type: Number, default: 0 },
+    rate_per_kwh: { type: Number, default: 4.4 },
+    timestamp: { type: Date, default: () => new Date(Date.now() + 7*60*60*1000) },
+    read: { type: Boolean, default: false }
+}, { timestamps: true });
+
+const DailyBillNotification = mongoose.model("daily_bill_notifications", dailyBillNotificationSchema);
+
 // ================= Helper Functions =================
 function calculateBill(energyKwh, ratePerKwh = 4.4) {
     return Number((energyKwh * ratePerKwh).toFixed(2));
@@ -765,6 +779,8 @@ app.post('/api/subscribe', (req, res) => {
 });
 
 // ฟังก์ชันส่ง Push Notification พร้อมบันทึกลง DB แยก collection
+// แทนที่ฟังก์ชัน sendPushNotification เดิมใน server.js
+
 async function sendPushNotification(title, body, type = 'test', data = {}) {
   try {
     let notification;
@@ -789,6 +805,19 @@ async function sendPushNotification(title, body, type = 'test', data = {}) {
           diff: data.diff
         });
         console.log('💾 Daily Diff Notification saved:', notification._id);
+        break;
+
+      case 'daily_bill':
+        notification = await DailyBillNotification.create({
+          title,
+          body,
+          date: data.date,
+          energy_kwh: data.energy_kwh,
+          electricity_bill: data.electricity_bill,
+          samples: data.samples || 0,
+          rate_per_kwh: data.rate_per_kwh || 4.4
+        });
+        console.log('💾 Daily Bill Notification saved:', notification._id);
         break;
 
       case 'test':
@@ -871,6 +900,77 @@ cron.schedule('*/10 * * * * *', () => {
   checkDailyPeak();
 });
 
+// ================== DAILY BILL AUTO NOTIFICATION ==================
+
+async function sendDailyBillNotification() {
+  try {
+    // คำนวณวันที่เมื่อวาน (เพราะตี 1 = เริ่มวันใหม่แล้ว)
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const dateStr = yesterday.toISOString().split('T')[0]; // YYYY-MM-DD
+
+    console.log(`📊 Calculating daily bill for ${dateStr}...`);
+
+    // ดึงข้อมูลจาก /daily-bill API
+    const { start, end } = getDayRangeUTC(dateStr);
+    const data = await PowerPXDH11.find({ 
+      timestamp: { $gte: start, $lte: end } 
+    }).sort({ timestamp: 1 }).select('power timestamp');
+
+    if (!data.length) {
+      console.log(`⚠️ No data found for ${dateStr}`);
+      return;
+    }
+
+    // คำนวณพลังงานรวม
+    let totalEnergyKwh = 0;
+    let totalPowerSum = 0;
+
+    for (let i = 0; i < data.length; i++) {
+      totalPowerSum += data[i].power;
+      
+      if (i === 0) continue;
+      
+      const intervalHours = (data[i].timestamp - data[i-1].timestamp) / 1000 / 3600;
+      totalEnergyKwh += ((data[i].power + data[i-1].power) / 2) * intervalHours;
+    }
+
+    totalEnergyKwh = Number(totalEnergyKwh.toFixed(2));
+    const electricityBill = calculateBill(totalEnergyKwh);
+    const samples = data.length;
+
+    console.log(`✅ Daily Bill: ${totalEnergyKwh} Unit = ${electricityBill} THB (${samples} samples)`);
+
+    // ส่ง Push Notification และบันทึก
+    await sendPushNotification(
+      '💰 Daily Energy Report',
+      `Yesterday (${dateStr}): ${totalEnergyKwh} Unit = ${electricityBill} THB`,
+      'daily_bill',
+      {
+        date: dateStr,
+        energy_kwh: totalEnergyKwh,
+        electricity_bill: electricityBill,
+        samples: samples,
+        rate_per_kwh: 4.4
+      }
+    );
+
+    console.log(`📤 Daily bill notification sent for ${dateStr}`);
+
+  } catch (err) {
+    console.error('❌ Error sending daily bill notification:', err);
+  }
+}
+
+// ตั้งเวลาให้ทำงานทุกวันตอนตี 1 (01:00:00)
+// รูปแบบ: second minute hour day month weekday
+// '0 0 1 * * *' = ทุกวันเวลา 01:00:00
+cron.schedule('0 0 1 * * *', () => {
+  console.log('⏰ Running daily bill notification job at 1:00 AM');
+  sendDailyBillNotification();
+}, {
+  timezone: "Asia/Bangkok" // ใช้เวลาไทย
+});
 // ================== TEST PUSH ==================
 app.get('/api/test-push', async (req, res) => {
   try {
@@ -987,8 +1087,60 @@ app.get('/api/notifications/test', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+// ================= DAILY BILL NOTIFICATION API =================
 
-// 4. ดึงทั้งหมด (รวม 3 collections)
+// ดึง Daily Bill Notifications
+app.get('/api/notifications/daily-bill', async (req, res) => {
+  try {
+    const { limit = 50, page = 1, unreadOnly = false } = req.query;
+    const query = unreadOnly === 'true' ? { read: false } : {};
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const notifications = await DailyBillNotification.find(query)
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .skip(skip);
+
+    const total = await DailyBillNotification.countDocuments(query);
+    const unreadCount = await DailyBillNotification.countDocuments({ read: false });
+
+    res.json({
+      success: true,
+      type: 'daily_bill',
+      data: notifications,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(total / parseInt(limit))
+      },
+      unreadCount
+    });
+  } catch (err) {
+    console.error('❌ GET /api/notifications/daily-bill error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ทดสอบส่ง Daily Bill Notification ทันที
+app.get('/api/test-daily-bill', async (req, res) => {
+  try {
+    await sendDailyBillNotification();
+    res.json({ 
+      success: true, 
+      message: 'Daily bill notification sent and saved to DB' 
+    });
+  } catch (err) {
+    console.error('❌ test-daily-bill error:', err);
+    res.status(500).json({ 
+      success: false, 
+      error: err.message 
+    });
+  }
+});
+// แทนที่ /api/notifications/all และ /recent ใน server.js
+
+// 4. ดึงทั้งหมด (รวม 4 collections)
 app.get('/api/notifications/all', async (req, res) => {
   try {
     const { limit = 50, page = 1, unreadOnly = false } = req.query;
@@ -1007,6 +1159,12 @@ app.get('/api/notifications/all', async (req, res) => {
       .skip(skip)
       .lean();
     
+    const dailyBillNoti = await DailyBillNotification.find(query)
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .skip(skip)
+      .lean();
+    
     const testNoti = await TestNotification.find(query)
       .sort({ timestamp: -1 })
       .limit(parseInt(limit))
@@ -1016,19 +1174,22 @@ app.get('/api/notifications/all', async (req, res) => {
     const allNotifications = [
       ...peakNoti.map(n => ({...n, type: 'peak'})),
       ...dailyDiffNoti.map(n => ({...n, type: 'daily_diff'})),
+      ...dailyBillNoti.map(n => ({...n, type: 'daily_bill'})),
       ...testNoti.map(n => ({...n, type: 'test'}))
     ].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
      .slice(0, parseInt(limit));
 
     const totalPeak = await PeakNotification.countDocuments(query);
-    const totalDaily = await DailyDiffNotification.countDocuments(query);
+    const totalDailyDiff = await DailyDiffNotification.countDocuments(query);
+    const totalDailyBill = await DailyBillNotification.countDocuments(query);
     const totalTest = await TestNotification.countDocuments(query);
-    const total = totalPeak + totalDaily + totalTest;
+    const total = totalPeak + totalDailyDiff + totalDailyBill + totalTest;
 
     const unreadPeak = await PeakNotification.countDocuments({ read: false });
-    const unreadDaily = await DailyDiffNotification.countDocuments({ read: false });
+    const unreadDailyDiff = await DailyDiffNotification.countDocuments({ read: false });
+    const unreadDailyBill = await DailyBillNotification.countDocuments({ read: false });
     const unreadTest = await TestNotification.countDocuments({ read: false });
-    const unreadCount = unreadPeak + unreadDaily + unreadTest;
+    const unreadCount = unreadPeak + unreadDailyDiff + unreadDailyBill + unreadTest;
 
     res.json({
       success: true,
@@ -1042,7 +1203,8 @@ app.get('/api/notifications/all', async (req, res) => {
       unreadCount,
       breakdown: {
         peak: { total: totalPeak, unread: unreadPeak },
-        daily_diff: { total: totalDaily, unread: unreadDaily },
+        daily_diff: { total: totalDailyDiff, unread: unreadDailyDiff },
+        daily_bill: { total: totalDailyBill, unread: unreadDailyBill },
         test: { total: totalTest, unread: unreadTest }
       }
     });
@@ -1067,6 +1229,11 @@ app.get('/api/notifications/recent', async (req, res) => {
       .limit(parseInt(limit))
       .lean();
     
+    const dailyBillNoti = await DailyBillNotification.find()
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .lean();
+    
     const testNoti = await TestNotification.find()
       .sort({ timestamp: -1 })
       .limit(parseInt(limit))
@@ -1075,14 +1242,16 @@ app.get('/api/notifications/recent', async (req, res) => {
     const allNotifications = [
       ...peakNoti.map(n => ({...n, type: 'peak'})),
       ...dailyDiffNoti.map(n => ({...n, type: 'daily_diff'})),
+      ...dailyBillNoti.map(n => ({...n, type: 'daily_bill'})),
       ...testNoti.map(n => ({...n, type: 'test'}))
     ].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
      .slice(0, parseInt(limit));
 
     const unreadPeak = await PeakNotification.countDocuments({ read: false });
-    const unreadDaily = await DailyDiffNotification.countDocuments({ read: false });
+    const unreadDailyDiff = await DailyDiffNotification.countDocuments({ read: false });
+    const unreadDailyBill = await DailyBillNotification.countDocuments({ read: false });
     const unreadTest = await TestNotification.countDocuments({ read: false });
-    const unreadCount = unreadPeak + unreadDaily + unreadTest;
+    const unreadCount = unreadPeak + unreadDailyDiff + unreadDailyBill + unreadTest;
 
     res.json({
       success: true,
@@ -1090,7 +1259,8 @@ app.get('/api/notifications/recent', async (req, res) => {
       unreadCount,
       breakdown: {
         peak: unreadPeak,
-        daily_diff: unreadDaily,
+        daily_diff: unreadDailyDiff,
+        daily_bill: unreadDailyBill,
         test: unreadTest
       }
     });
@@ -1099,6 +1269,8 @@ app.get('/api/notifications/recent', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// แทนที่ PATCH /api/notifications/mark-read และ mark-all-read ใน server.js
 
 // 6. ทำเครื่องหมายว่าอ่านแล้ว
 app.patch('/api/notifications/mark-read', async (req, res) => {
@@ -1127,6 +1299,12 @@ app.patch('/api/notifications/mark-read', async (req, res) => {
           { $set: { read: true } }
         );
         break;
+      case 'daily_bill':
+        result = await DailyBillNotification.updateMany(
+          { _id: { $in: ids } },
+          { $set: { read: true } }
+        );
+        break;
       case 'test':
         result = await TestNotification.updateMany(
           { _id: { $in: ids } },
@@ -1144,6 +1322,51 @@ app.patch('/api/notifications/mark-read', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ PATCH /api/notifications/mark-read error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 7. ทำเครื่องหมายทั้งหมดว่าอ่านแล้ว
+app.patch('/api/notifications/mark-all-read', async (req, res) => {
+  try {
+    const resultPeak = await PeakNotification.updateMany(
+      { read: false },
+      { $set: { read: true } }
+    );
+    
+    const resultDailyDiff = await DailyDiffNotification.updateMany(
+      { read: false },
+      { $set: { read: true } }
+    );
+    
+    const resultDailyBill = await DailyBillNotification.updateMany(
+      { read: false },
+      { $set: { read: true } }
+    );
+    
+    const resultTest = await TestNotification.updateMany(
+      { read: false },
+      { $set: { read: true } }
+    );
+
+    const totalModified = resultPeak.modifiedCount + 
+                         resultDailyDiff.modifiedCount + 
+                         resultDailyBill.modifiedCount +
+                         resultTest.modifiedCount;
+
+    res.json({
+      success: true,
+      message: `Marked ${totalModified} notifications as read`,
+      breakdown: {
+        peak: resultPeak.modifiedCount,
+        daily_diff: resultDailyDiff.modifiedCount,
+        daily_bill: resultDailyBill.modifiedCount,
+        test: resultTest.modifiedCount
+      },
+      totalModified
+    });
+  } catch (err) {
+    console.error('❌ PATCH /api/notifications/mark-all-read error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1184,6 +1407,8 @@ app.patch('/api/notifications/mark-all-read', async (req, res) => {
   }
 });
 
+// แทนที่ DELETE /api/notifications/:type/:id และ stats ใน server.js
+
 // 8. ลบ notification
 app.delete('/api/notifications/:type/:id', async (req, res) => {
   try {
@@ -1196,6 +1421,9 @@ app.delete('/api/notifications/:type/:id', async (req, res) => {
         break;
       case 'daily_diff':
         result = await DailyDiffNotification.findByIdAndDelete(id);
+        break;
+      case 'daily_bill':
+        result = await DailyBillNotification.findByIdAndDelete(id);
         break;
       case 'test':
         result = await TestNotification.findByIdAndDelete(id);
@@ -1223,11 +1451,12 @@ app.delete('/api/notifications', async (req, res) => {
   try {
     const { type } = req.query;
 
-    let resultPeak, resultDaily, resultTest;
+    let resultPeak, resultDailyDiff, resultDailyBill, resultTest;
 
     if (!type || type === 'all') {
       resultPeak = await PeakNotification.deleteMany({});
-      resultDaily = await DailyDiffNotification.deleteMany({});
+      resultDailyDiff = await DailyDiffNotification.deleteMany({});
+      resultDailyBill = await DailyBillNotification.deleteMany({});
       resultTest = await TestNotification.deleteMany({});
     } else {
       switch(type) {
@@ -1235,7 +1464,10 @@ app.delete('/api/notifications', async (req, res) => {
           resultPeak = await PeakNotification.deleteMany({});
           break;
         case 'daily_diff':
-          resultDaily = await DailyDiffNotification.deleteMany({});
+          resultDailyDiff = await DailyDiffNotification.deleteMany({});
+          break;
+        case 'daily_bill':
+          resultDailyBill = await DailyBillNotification.deleteMany({});
           break;
         case 'test':
           resultTest = await TestNotification.deleteMany({});
@@ -1246,7 +1478,8 @@ app.delete('/api/notifications', async (req, res) => {
     }
 
     const totalDeleted = (resultPeak?.deletedCount || 0) + 
-                        (resultDaily?.deletedCount || 0) + 
+                        (resultDailyDiff?.deletedCount || 0) + 
+                        (resultDailyBill?.deletedCount || 0) +
                         (resultTest?.deletedCount || 0);
 
     res.json({
@@ -1254,7 +1487,8 @@ app.delete('/api/notifications', async (req, res) => {
       message: `Deleted ${totalDeleted} notifications`,
       breakdown: {
         peak: resultPeak?.deletedCount || 0,
-        daily_diff: resultDaily?.deletedCount || 0,
+        daily_diff: resultDailyDiff?.deletedCount || 0,
+        daily_bill: resultDailyBill?.deletedCount || 0,
         test: resultTest?.deletedCount || 0
       },
       totalDeleted
@@ -1272,16 +1506,20 @@ app.get('/api/notifications/stats', async (req, res) => {
     const unreadPeak = await PeakNotification.countDocuments({ read: false });
     const latestPeak = await PeakNotification.findOne().sort({ timestamp: -1 });
 
-    const totalDaily = await DailyDiffNotification.countDocuments();
-    const unreadDaily = await DailyDiffNotification.countDocuments({ read: false });
-    const latestDaily = await DailyDiffNotification.findOne().sort({ timestamp: -1 });
+    const totalDailyDiff = await DailyDiffNotification.countDocuments();
+    const unreadDailyDiff = await DailyDiffNotification.countDocuments({ read: false });
+    const latestDailyDiff = await DailyDiffNotification.findOne().sort({ timestamp: -1 });
+
+    const totalDailyBill = await DailyBillNotification.countDocuments();
+    const unreadDailyBill = await DailyBillNotification.countDocuments({ read: false });
+    const latestDailyBill = await DailyBillNotification.findOne().sort({ timestamp: -1 });
 
     const totalTest = await TestNotification.countDocuments();
     const unreadTest = await TestNotification.countDocuments({ read: false });
     const latestTest = await TestNotification.findOne().sort({ timestamp: -1 });
 
-    const total = totalPeak + totalDaily + totalTest;
-    const unread = unreadPeak + unreadDaily + unreadTest;
+    const total = totalPeak + totalDailyDiff + totalDailyBill + totalTest;
+    const unread = unreadPeak + unreadDailyDiff + unreadDailyBill + unreadTest;
 
     res.json({
       success: true,
@@ -1297,10 +1535,16 @@ app.get('/api/notifications/stats', async (req, res) => {
             latest: latestPeak
           },
           daily_diff: {
-            total: totalDaily,
-            unread: unreadDaily,
-            read: totalDaily - unreadDaily,
-            latest: latestDaily
+            total: totalDailyDiff,
+            unread: unreadDailyDiff,
+            read: totalDailyDiff - unreadDailyDiff,
+            latest: latestDailyDiff
+          },
+          daily_bill: {
+            total: totalDailyBill,
+            unread: unreadDailyBill,
+            read: totalDailyBill - unreadDailyBill,
+            latest: latestDailyBill
           },
           test: {
             total: totalTest,
